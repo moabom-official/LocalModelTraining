@@ -61,23 +61,22 @@ class LocalRobertaClassifier:
         from comment_filtering_agent.classifiers.classifier_interface import (
             ClassificationResult,
         )
-        # 3-class softmax 결과를 받아 rejection 적용 후 4-class 출력으로 매핑.
-        # max softmax < REJECTION_THRESHOLD 면 NOISE 로 분류.
+        # 3-class per-class **sigmoid** 결과를 받아 rejection 적용 후 4-class.
+        # max sigmoid < REJECTION_THRESHOLD 면 NOISE (셋 다 충분히 확신 못 함).
         positive_label = C.TRAINING_ID2LABEL[int(label_id)]
         if confidence < C.REJECTION_THRESHOLD:
-            # OOD / 저신뢰 → NOISE. confidence 는 "NOISE 라고 판단한 강도"로
-            # 재정의 (1 - max_positive_conf).
+            # OOD / 저신뢰 → NOISE. confidence 는 "NOISE 라고 판단한 강도".
             label = C.NOISE_LABEL
             out_conf = 1.0 - float(confidence)
             rationale = (
                 f"local roberta rejected as NOISE "
-                f"(top {positive_label} conf {confidence:.2f} < "
+                f"(top {positive_label} sigmoid {confidence:.2f} < "
                 f"τ={C.REJECTION_THRESHOLD})"
             )
         else:
             label = positive_label
             out_conf = float(confidence)
-            rationale = f"local roberta (conf {confidence:.2f})"
+            rationale = f"local roberta (sigmoid {confidence:.2f})"
 
         return ClassificationResult(
             label=label,
@@ -91,6 +90,11 @@ class LocalRobertaClassifier:
         )
 
     def _predict(self, texts: list[str]) -> tuple[list[int], list[float]]:
+        """Per-class sigmoid 추론. 반환: (argmax 클래스 id, 그 클래스의 sigmoid 값).
+
+        Note: max sigmoid 가 rejection 신호. softmax 와 달리 합=1 제약 없음 →
+        OOD 입력에 대해 모든 클래스 sigmoid 가 동시에 낮을 수 있음.
+        """
         torch = self._torch
         enc = self.tokenizer(
             list(texts),
@@ -104,7 +108,8 @@ class LocalRobertaClassifier:
             with torch.autocast(device_type=self.device.type, dtype=autocast_dtype,
                                 enabled=self.use_bf16):
                 logits = self.model(**enc).logits
-            probs = torch.softmax(logits.float(), dim=-1)
+            # Per-class sigmoid (multi-label) — softmax 아님.
+            probs = torch.sigmoid(logits.float())
             conf, pred = probs.max(dim=-1)
         return pred.cpu().tolist(), conf.cpu().tolist()
 

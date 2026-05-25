@@ -1,8 +1,12 @@
-"""Evaluate the saved 3-class model on the 4-class test split with rejection.
+"""Evaluate the saved 3-class multi-label model on the 4-class test split.
 
-3-class softmax 결과에 ``REJECTION_THRESHOLD`` 기반 rejection 을 적용해
+Per-class **sigmoid** 결과에 ``REJECTION_THRESHOLD`` 기반 rejection 을 적용해
 4-class output 공간 (PO / VR / Q / NOISE) 의 정확도·P/R/F1·confusion matrix
 를 계산한다. 추가로 다양한 임계값 sweep 으로 best tau 를 탐색.
+
+핵심 차이 (vs softmax 버전):
+- max sigmoid < τ 이면 셋 다 충분히 확신 안 함 → NOISE.
+  softmax 와 달리 합=1 제약 없어 OOD 입력에 대해 동시에 낮을 수 있음.
 
 Run:  python -m local_classifier.evaluate
 """
@@ -97,7 +101,8 @@ def main() -> None:
             with torch.autocast(device_type=device.type, dtype=autocast_dtype,
                                 enabled=device.type == "cuda"):
                 logits = model(input_ids=ids, attention_mask=mask).logits
-            probs = torch.softmax(logits.float(), dim=-1)
+            # Per-class sigmoid (multi-label). softmax 아님.
+            probs = torch.sigmoid(logits.float())
             max_p, pred = probs.max(dim=-1)
             all_max_probs.extend(max_p.cpu().tolist())
             all_pred_ids.extend(pred.cpu().tolist())
@@ -140,7 +145,8 @@ def main() -> None:
     print("=" * 78)
     print(f"{'tau':>5s}  " + "  ".join(f"{lbl[:6]:>6s}" for lbl in C.OUTPUT_LABEL_NAMES) + "  macro")
     best_tau, best_macro = default_tau, macro
-    for tau in [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85]:
+    # sigmoid 분포는 softmax 와 달리 0~1 전체에 퍼질 수 있어서 sweep 범위 확장.
+    for tau in [0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]:
         y_sweep = predict_with_rejection(all_max_probs, all_pred_ids, tau)
         f1s_sweep = [f1_per_class(all_true_labels, y_sweep, l)[0] for l in C.OUTPUT_LABEL_NAMES]
         m = sum(f1s_sweep) / len(C.OUTPUT_LABEL_NAMES)

@@ -1,8 +1,14 @@
-# KLUE-RoBERTa Distill — 댓글 4-class 분류기
+# KLUE-RoBERTa Distill — 3-class multi-label + NOISE rejection
 
 GPT-4.1 teacher 라벨(`comment_labels/labeled_gpt41_azure.jsonl`, 6,375건)로 `klue/roberta-large`를 distill하고, 운영에서는 confidence-gated cascade(`local 1차 → 저신뢰만 GPT-4.1 fallback`)로 호출비를 줄이는 모듈.
 
-> **2026-05-25 라벨 체계 변경**: 5-class (PRODUCT_OPINION / VIDEO_REACTION / CHATTER / QUESTION / OFF_TOPIC) → 4-class (PRODUCT_OPINION / VIDEO_REACTION / QUESTION / **NOISE**). 구 CHATTER + OFF_TOPIC 가 NOISE 로 통합. 입력 teacher 라벨이 구 5-class 로 들어오면 `prepare_dataset` 단계의 `clean_record` 가 `config.remap_legacy_label()` 로 자동 매핑.
+> **설계 진화 (2026-05-25 ~ 2026-05-26)**
+> 1. 5-class 직접 학습 (CHATTER / OFF_TOPIC 분리) → baseline
+> 2. 4-class 통합 학습 (NOISE = CHATTER + OFF_TOPIC) → val F1 0.79, NOISE F1 0.60 정체
+> 3. 3-class **softmax** + threshold rejection → val F1 0.90 이지만 NOISE F1 0.034 (OOD overconfidence)
+> 4. **3-class multi-label sigmoid + BCE 학습** ← 현재. 각 클래스 독립 확률이라 셋 다 낮으면 NOISE 표현 가능
+>
+> 구 CHATTER / OFF_TOPIC 라벨 입력은 `config.remap_legacy_label()` 가 NOISE 로 자동 매핑.
 
 ## 폴더 구조
 

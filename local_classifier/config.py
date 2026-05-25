@@ -21,11 +21,13 @@ DATA_DIR = OUTPUT_DIR / "data"
 MODEL_DIR = OUTPUT_DIR / "model"
 LOG_DIR = OUTPUT_DIR / "logs"
 
-# ---- Labels (dual scheme: 3-class training, 4-class output) ----------------
-# Strategy: NOISE 는 양성 클래스로 학습하지 않고, 추론 시 max softmax 가
-# REJECTION_THRESHOLD 미만이면 NOISE 로 분류 (classification with rejection /
-# open-set 접근). 2026-05-25 변경 — 4-class 학습이 NOISE F1=0.60 에 막혀서
-# 이질적 데이터 직접 학습을 피하기 위함.
+# ---- Labels (dual scheme: 3-class multi-label training, 4-class output) ----
+# Strategy: NOISE 는 양성 클래스로 학습하지 않고, 추론 시 **per-class sigmoid**
+# 최댓값이 REJECTION_THRESHOLD 미만이면 NOISE 로 분류. 2026-05-26 변경 —
+# softmax + threshold 접근은 OOD overconfidence 로 NOISE F1=0.034 까지 떨어짐.
+# softmax 는 확률 합=1 강제 → 모델에 "셋 다 아님" 출구가 없음.
+# 해결: per-class **sigmoid** head + BCE loss → 각 클래스 독립 확률 →
+# 셋 다 < 임계값이면 NOISE.
 
 # 모델이 학습하는 양성 클래스 (3개)
 TRAINING_LABEL_NAMES = [
@@ -68,10 +70,12 @@ def remap_legacy_label(label: str | None) -> str | None:
     return LEGACY_LABEL_REMAP.get(label, label)
 
 
-# ---- Rejection (open-set classification) -----------------------------------
-# 모델 추론 시 max softmax 가 이 값 미만이면 NOISE 로 분류.
-# 운영 데이터로 calibration 후 tune. baseline 0.55 (val NOISE F1 기준).
-REJECTION_THRESHOLD = 0.55
+# ---- Rejection (open-set classification, sigmoid head) ---------------------
+# 추론 시 per-class **sigmoid** 최댓값이 이 값 미만이면 NOISE 로 분류.
+# softmax 와 의미가 다름 — sigmoid 0.5 = "이 클래스일 확률 50%". 셋 다 <τ면
+# 모델이 "어느 것도 충분히 확신 못 함" 을 표현 가능 (softmax 는 합=1 제약).
+# 운영 데이터 calibration 후 tune. baseline 0.5.
+REJECTION_THRESHOLD = 0.5
 
 # ---- Preprocess filters ----------------------------------------------------
 MIN_CONFIDENCE = 0.85
