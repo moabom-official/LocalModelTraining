@@ -120,11 +120,12 @@ def main() -> None:
     torch.backends.cudnn.allow_tf32 = True
 
     tokenizer = AutoTokenizer.from_pretrained(C.BASE_MODEL)
+    # 3-class training head (NOISE 는 rejection 으로 처리, 학습 클래스 아님)
     model = AutoModelForSequenceClassification.from_pretrained(
         C.BASE_MODEL,
         num_labels=C.NUM_LABELS,
-        id2label=C.ID2LABEL,
-        label2id=C.LABEL2ID,
+        id2label=C.TRAINING_ID2LABEL,
+        label2id=C.TRAINING_LABEL2ID,
     ).to(device)
 
     train_ds = CommentDataset(C.DATA_DIR / "train.jsonl", tokenizer, C.MAX_SEQ_LEN)
@@ -218,7 +219,7 @@ def main() -> None:
               f"train_loss={run_loss / max(seen, 1):.4f} "
               f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} "
               f"val_macro_f1={val_macro_f1:.4f}")
-        for cid, name in C.ID2LABEL.items():
+        for cid, name in C.TRAINING_ID2LABEL.items():
             print(f"  {name:18s} acc={per_class[cid]:.3f}  f1={val_f1s[cid]:.3f}")
 
         metrics_log.append({
@@ -240,7 +241,9 @@ def main() -> None:
                 json.dumps({
                     "base_model": C.BASE_MODEL,
                     "max_seq_len": C.MAX_SEQ_LEN,
-                    "label2id": C.LABEL2ID,
+                    "label2id": C.TRAINING_LABEL2ID,
+                    "output_label2id": C.OUTPUT_LABEL2ID,
+                    "rejection_threshold": C.REJECTION_THRESHOLD,
                     "best_val_macro_f1": best_f1,
                     "best_val_acc": val_acc,
                     "epoch": epoch,

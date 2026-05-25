@@ -21,22 +21,36 @@ DATA_DIR = OUTPUT_DIR / "data"
 MODEL_DIR = OUTPUT_DIR / "model"
 LOG_DIR = OUTPUT_DIR / "logs"
 
-# ---- Labels (4-class) ------------------------------------------------------
-# Order matches comment_filtering_agent.classifiers.classifier_interface
-# .FineTunedClassifier.label_map — do NOT change without retraining.
-# CHATTER + OFF_TOPIC 통합 → NOISE (2026-05-25).
-LABEL_NAMES = [
+# ---- Labels (dual scheme: 3-class training, 4-class output) ----------------
+# Strategy: NOISE 는 양성 클래스로 학습하지 않고, 추론 시 max softmax 가
+# REJECTION_THRESHOLD 미만이면 NOISE 로 분류 (classification with rejection /
+# open-set 접근). 2026-05-25 변경 — 4-class 학습이 NOISE F1=0.60 에 막혀서
+# 이질적 데이터 직접 학습을 피하기 위함.
+
+# 모델이 학습하는 양성 클래스 (3개)
+TRAINING_LABEL_NAMES = [
     "PRODUCT_OPINION",
     "VIDEO_REACTION",
     "QUESTION",
-    "NOISE",
 ]
-LABEL2ID = {name: i for i, name in enumerate(LABEL_NAMES)}
-ID2LABEL = {i: name for i, name in enumerate(LABEL_NAMES)}
-NUM_LABELS = len(LABEL_NAMES)
+TRAINING_LABEL2ID = {name: i for i, name in enumerate(TRAINING_LABEL_NAMES)}
+TRAINING_ID2LABEL = {i: name for i, name in enumerate(TRAINING_LABEL_NAMES)}
+NUM_LABELS = len(TRAINING_LABEL_NAMES)  # 모델 head 크기 (3)
+
+# 다운스트림(comment_filtering_agent / DB enum) 에 노출되는 4-class 라벨.
+# evaluate / 운영 추론 시 NOISE 가 합쳐진 형태로 보고됨.
+NOISE_LABEL = "NOISE"
+OUTPUT_LABEL_NAMES = TRAINING_LABEL_NAMES + [NOISE_LABEL]
+OUTPUT_LABEL2ID = {name: i for i, name in enumerate(OUTPUT_LABEL_NAMES)}
+OUTPUT_ID2LABEL = {i: name for i, name in enumerate(OUTPUT_LABEL_NAMES)}
+
+# 하위 호환 alias — 기존 코드/문서가 LABEL_NAMES / LABEL2ID / ID2LABEL
+# 를 참조하는 경우 4-class 출력 라벨을 가리킴.
+LABEL_NAMES = OUTPUT_LABEL_NAMES
+LABEL2ID = OUTPUT_LABEL2ID
+ID2LABEL = OUTPUT_ID2LABEL
 
 # 입력 라벨이 구 5-class 체계(CHATTER / OFF_TOPIC)로 들어오면 자동으로 NOISE 로 통합.
-# prepare_dataset.clean_record 와 외부에서 import 가능한 단일 진입점.
 LEGACY_LABEL_REMAP = {
     "CHATTER": "NOISE",
     "OFF_TOPIC": "NOISE",
@@ -46,12 +60,18 @@ LEGACY_LABEL_REMAP = {
 def remap_legacy_label(label: str | None) -> str | None:
     """구 5-class 라벨(CHATTER / OFF_TOPIC)을 NOISE 로 자동 통합.
 
-    None 입력은 None 반환. 알 수 없는 라벨은 그대로 통과 → LABEL2ID
-    membership 체크 단계에서 제외됨.
+    None 입력은 None 반환. 알 수 없는 라벨은 그대로 통과 → 후속 membership
+    체크 단계에서 제외됨.
     """
     if label is None:
         return None
     return LEGACY_LABEL_REMAP.get(label, label)
+
+
+# ---- Rejection (open-set classification) -----------------------------------
+# 모델 추론 시 max softmax 가 이 값 미만이면 NOISE 로 분류.
+# 운영 데이터로 calibration 후 tune. baseline 0.55 (val NOISE F1 기준).
+REJECTION_THRESHOLD = 0.55
 
 # ---- Preprocess filters ----------------------------------------------------
 MIN_CONFIDENCE = 0.85

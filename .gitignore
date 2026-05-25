@@ -1,5 +1,6 @@
 # Training artifacts (data splits / model weights / logs)
 local_classifier/artifacts/
+local_classifier/logs/
 
 # Python
 __pycache__/

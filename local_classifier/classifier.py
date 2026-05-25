@@ -61,12 +61,29 @@ class LocalRobertaClassifier:
         from comment_filtering_agent.classifiers.classifier_interface import (
             ClassificationResult,
         )
-        label = C.ID2LABEL[int(label_id)]
+        # 3-class softmax 결과를 받아 rejection 적용 후 4-class 출력으로 매핑.
+        # max softmax < REJECTION_THRESHOLD 면 NOISE 로 분류.
+        positive_label = C.TRAINING_ID2LABEL[int(label_id)]
+        if confidence < C.REJECTION_THRESHOLD:
+            # OOD / 저신뢰 → NOISE. confidence 는 "NOISE 라고 판단한 강도"로
+            # 재정의 (1 - max_positive_conf).
+            label = C.NOISE_LABEL
+            out_conf = 1.0 - float(confidence)
+            rationale = (
+                f"local roberta rejected as NOISE "
+                f"(top {positive_label} conf {confidence:.2f} < "
+                f"τ={C.REJECTION_THRESHOLD})"
+            )
+        else:
+            label = positive_label
+            out_conf = float(confidence)
+            rationale = f"local roberta (conf {confidence:.2f})"
+
         return ClassificationResult(
             label=label,
-            confidence=float(confidence),
-            rationale_short=f"local roberta (conf {confidence:.2f})",
-            needs_recheck=(confidence < C.ROUTER_TAU_HIGH),
+            confidence=out_conf,
+            rationale_short=rationale,
+            needs_recheck=(out_conf < C.ROUTER_TAU_HIGH),
             mentioned_product_features=[],
             is_product_related=(label in {"PRODUCT_OPINION", "QUESTION"}),
             classifier_used="local-roberta",

@@ -4,16 +4,24 @@
 
 GPT-4.1 teacher 라벨로 `klue/roberta-large` 를 distill 하고, 운영에서는 cascade router (`local → 저신뢰만 GPT-4.1 fallback`) 로 API 호출비를 줄이기 위한 분리 리포지토리.
 
-## 라벨 체계 (4-class, 2026-05-25 통합)
+## 라벨 체계 (3-class training + rejection → 4-class output, 2026-05-25)
 
-| id | label | 설명 |
-|----|-------|------|
+**모델은 3개 양성 클래스만 학습**하고, 추론 시 `max softmax < REJECTION_THRESHOLD` 면 NOISE 로 분류 (classification with rejection / open-set 접근).
+
+| 학습 head id | 학습 라벨 | 설명 |
+|---:|-------|------|
 | 0 | PRODUCT_OPINION | 제품 평가 |
 | 1 | VIDEO_REACTION | 영상·리뷰어 반응 |
 | 2 | QUESTION | 제품 관련 질문 |
-| 3 | NOISE | 잡담·밈·제품 무관 (구 CHATTER + OFF_TOPIC 통합) |
 
-운영 export 가 구 5-class (CHATTER / OFF_TOPIC) 로 들어오면 `local_classifier/config.py:remap_legacy_label()` 가 자동으로 NOISE 로 통합한다. `prepare_dataset` 실행 시 변환된 record 수가 콘솔에 출력됨.
+| 출력 라벨 (4-class, downstream) | 산출 방식 |
+|---|---|
+| PRODUCT_OPINION / VIDEO_REACTION / QUESTION | argmax (단, max softmax ≥ τ) |
+| **NOISE** | max softmax < τ → reject |
+
+**왜 이 구조?** 첫 시도는 4-class 직접 학습이었으나 NOISE F1=0.60 에 막힘 (test macro F1 0.775). 원인: CHATTER(짧고 의미없음) + OFF_TOPIC(다른 주제) 가 의미적으로 너무 이질적이라 단일 클래스로 학습하기 어려움. 3-class 학습은 깨끗한 양성 클래스만 모델링하고 NOISE 는 "정답 3개 중 어느 것도 아닌 것" 으로 정의.
+
+운영 export 가 구 5-class (CHATTER / OFF_TOPIC) 로 들어오면 `local_classifier/config.py:remap_legacy_label()` 가 자동으로 NOISE 로 통합한다. NOISE 라벨은 train/val 에서 제거되고 test 에만 유지되어 rejection 성능 평가에 사용됨.
 
 ## 리포 구조
 
