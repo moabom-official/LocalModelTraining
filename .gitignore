@@ -1,0 +1,19 @@
+# Training artifacts (data splits / model weights / logs)
+local_classifier/artifacts/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Env / IDE
+.env
+.venv/
+venv/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,7 @@
+# Pin loosely — pick CUDA build of torch per server.
+# On A40 (CUDA 12.x) install with:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+torch>=2.1
+transformers>=4.40
+sentencepiece
+numpy
