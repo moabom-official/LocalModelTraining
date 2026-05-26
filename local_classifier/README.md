@@ -1,12 +1,16 @@
-# KLUE-RoBERTa Distill — 3-class multi-label + NOISE rejection
+# KLUE-RoBERTa Distill — 4-class 댓글 분류기
 
 GPT-4.1 teacher 라벨(`comment_labels/labeled_gpt41_azure.jsonl`, 6,375건)로 `klue/roberta-large`를 distill하고, 운영에서는 confidence-gated cascade(`local 1차 → 저신뢰만 GPT-4.1 fallback`)로 호출비를 줄이는 모듈.
 
-> **설계 진화 (2026-05-25 ~ 2026-05-26)**
+라벨: **PRODUCT_OPINION / VIDEO_REACTION / QUESTION / NOISE** (4-class). softmax + argmax 직접 학습.
+
+> **설계 진화 히스토리 (참고)**
 > 1. 5-class 직접 학습 (CHATTER / OFF_TOPIC 분리) → baseline
-> 2. 4-class 통합 학습 (NOISE = CHATTER + OFF_TOPIC) → val F1 0.79, NOISE F1 0.60 정체
-> 3. 3-class **softmax** + threshold rejection → val F1 0.90 이지만 NOISE F1 0.034 (OOD overconfidence)
-> 4. **3-class multi-label sigmoid + BCE 학습** ← 현재. 각 클래스 독립 확률이라 셋 다 낮으면 NOISE 표현 가능
+> 2. **4-class 통합 학습** (NOISE = CHATTER + OFF_TOPIC) → test macro F1 **0.775** ← **현재 채택**
+> 3. 3-class softmax + threshold rejection → val F1 0.90 이지만 test NOISE F1 0.034 (OOD overconfidence) → 폐기
+> 4. 3-class multi-label sigmoid + BCE → val F1 0.89 / test NOISE F1 0.0 더 악화 → 폐기
+>
+> **결론**: 후처리 rejection 으로는 OOD 검출 한계. NOISE 도 양성 클래스로 직접 학습이 가장 안정적이며, NOISE F1 정체는 데이터 보강 (`mine_noise.py` / `fetch_noise_groq.py`) 으로 해결.
 >
 > 구 CHATTER / OFF_TOPIC 라벨 입력은 `config.remap_legacy_label()` 가 NOISE 로 자동 매핑.
 

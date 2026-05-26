@@ -4,8 +4,8 @@ Conforms to ``BaseCommentClassifier`` from
 ``comment_filtering_agent.classifiers.classifier_interface`` so the cascade
 router can swap it for the existing API classifier with zero pipeline changes.
 
-Outputs 4-class labels: PRODUCT_OPINION / VIDEO_REACTION / QUESTION / NOISE
-(NOISE = 구 CHATTER + OFF_TOPIC 통합, 2026-05-25).
+Outputs 4-class labels: PRODUCT_OPINION / VIDEO_REACTION / QUESTION / NOISE.
+NOISE 는 양성 클래스로 직접 학습됨 (softmax + argmax 단순 분류).
 """
 from __future__ import annotations
 
@@ -61,28 +61,12 @@ class LocalRobertaClassifier:
         from comment_filtering_agent.classifiers.classifier_interface import (
             ClassificationResult,
         )
-        # 3-class per-class **sigmoid** 결과를 받아 rejection 적용 후 4-class.
-        # max sigmoid < REJECTION_THRESHOLD 면 NOISE (셋 다 충분히 확신 못 함).
-        positive_label = C.TRAINING_ID2LABEL[int(label_id)]
-        if confidence < C.REJECTION_THRESHOLD:
-            # OOD / 저신뢰 → NOISE. confidence 는 "NOISE 라고 판단한 강도".
-            label = C.NOISE_LABEL
-            out_conf = 1.0 - float(confidence)
-            rationale = (
-                f"local roberta rejected as NOISE "
-                f"(top {positive_label} sigmoid {confidence:.2f} < "
-                f"τ={C.REJECTION_THRESHOLD})"
-            )
-        else:
-            label = positive_label
-            out_conf = float(confidence)
-            rationale = f"local roberta (sigmoid {confidence:.2f})"
-
+        label = C.ID2LABEL[int(label_id)]
         return ClassificationResult(
             label=label,
-            confidence=out_conf,
-            rationale_short=rationale,
-            needs_recheck=(out_conf < C.ROUTER_TAU_HIGH),
+            confidence=float(confidence),
+            rationale_short=f"local roberta (conf {confidence:.2f})",
+            needs_recheck=(confidence < C.ROUTER_TAU_HIGH),
             mentioned_product_features=[],
             is_product_related=(label in {"PRODUCT_OPINION", "QUESTION"}),
             classifier_used="local-roberta",
@@ -90,11 +74,7 @@ class LocalRobertaClassifier:
         )
 
     def _predict(self, texts: list[str]) -> tuple[list[int], list[float]]:
-        """Per-class sigmoid 추론. 반환: (argmax 클래스 id, 그 클래스의 sigmoid 값).
-
-        Note: max sigmoid 가 rejection 신호. softmax 와 달리 합=1 제약 없음 →
-        OOD 입력에 대해 모든 클래스 sigmoid 가 동시에 낮을 수 있음.
-        """
+        """Softmax 추론. 반환: (argmax 클래스 id, 그 클래스의 softmax 확률)."""
         torch = self._torch
         enc = self.tokenizer(
             list(texts),
@@ -108,8 +88,7 @@ class LocalRobertaClassifier:
             with torch.autocast(device_type=self.device.type, dtype=autocast_dtype,
                                 enabled=self.use_bf16):
                 logits = self.model(**enc).logits
-            # Per-class sigmoid (multi-label) — softmax 아님.
-            probs = torch.sigmoid(logits.float())
+            probs = torch.softmax(logits.float(), dim=-1)
             conf, pred = probs.max(dim=-1)
         return pred.cpu().tolist(), conf.cpu().tolist()
 

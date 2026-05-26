@@ -1,21 +1,16 @@
-"""End-to-end dataset prep (3-class training + rejection scheme):
+"""End-to-end dataset prep (4-class direct training):
 
   comment_labels/labeled_gpt41_azure.jsonl
     ↓ filter (teacher, confidence, len) — 4-class membership (PO/VR/Q/NOISE)
+    ↓ legacy remap (CHATTER / OFF_TOPIC → NOISE)
     ↓ normalize (NFKC, PII scrub, repeat-char compress)
     ↓ language detect
     ↓ near-dup dedup
-    ↓ video_id grouped split (train / val / test)
-    ↓ train/val: drop NOISE records (model learns only 3 positive classes)
-    ↓ test:      keep all 4 classes (rejection 평가 가능)
-    ↓ class weights (3-class)
+    ↓ video_id grouped split (train / val / test, 모두 4-class 유지)
+    ↓ class weights (4-class)
   artifacts/data/{train,val,test}.jsonl  +  class_weights.json
 
-라벨 ID 스페이스가 split 별로 다름:
-- train.jsonl / val.jsonl : label_id ∈ {0,1,2}  (TRAINING_LABEL2ID)
-- test.jsonl              : label_id ∈ {0,1,2,3}  (OUTPUT_LABEL2ID, NOISE=3)
-이는 학습 시 NUM_LABELS=3 모델 head 와 정합. 추론 후 rejection 거쳐 4-class
-output 공간으로 mapping.
+모든 split 의 label_id ∈ {0,1,2,3} (LABEL2ID 단일 공간).
 
 Run:  python -m local_classifier.prepare_dataset
 """
@@ -43,9 +38,7 @@ def clean_record(rec: dict) -> dict | None:
         return None
     # 구 5-class 라벨(CHATTER / OFF_TOPIC)은 자동으로 NOISE 로 통합.
     label = C.remap_legacy_label(rec.get("label"))
-    # 4-class (PO/VR/Q/NOISE) membership 체크. label_id 는 split 에서
-    # train/val 용으로는 TRAINING_LABEL2ID 로 재매핑됨.
-    if label not in C.OUTPUT_LABEL2ID:
+    if label not in C.LABEL2ID:
         return None
     try:
         conf = float(rec.get("confidence") or 0.0)
@@ -63,8 +56,7 @@ def clean_record(rec: dict) -> dict | None:
         "product_id": rec.get("product_id"),
         "text": text,
         "label": label,
-        # 4-class id (test/eval 용). train/val 은 write 직전에 3-class 로 재매핑.
-        "label_id": C.OUTPUT_LABEL2ID[label],
+        "label_id": C.LABEL2ID[label],
         "confidence": conf,
         "lang": detect_lang(text),
     }
@@ -145,44 +137,24 @@ def main() -> None:
     train, val, test = video_grouped_split(
         cleaned, C.VAL_RATIO, C.TEST_RATIO, C.SEED
     )
-
-    # ----- 3-class training + rejection scheme -----
-    # train/val 에서 NOISE 제거 + label_id 를 TRAINING_LABEL2ID 공간으로 재매핑.
-    # test 는 NOISE 포함 + 4-class label_id 유지 (rejection 평가 용).
-    def _to_training_record(r: dict) -> dict:
-        return {**r, "label_id": C.TRAINING_LABEL2ID[r["label"]]}
-
-    train_kept = [_to_training_record(r) for r in train if r["label"] != C.NOISE_LABEL]
-    val_kept = [_to_training_record(r) for r in val if r["label"] != C.NOISE_LABEL]
-    # test 는 4-class 그대로 유지 (label_id 는 OUTPUT 공간).
-
-    n_train_dropped = len(train) - len(train_kept)
-    n_val_dropped = len(val) - len(val_kept)
-    n_test_noise = sum(1 for r in test if r["label"] == C.NOISE_LABEL)
-    print(
-        f"\n[3-class training] dropped NOISE: train -{n_train_dropped}, "
-        f"val -{n_val_dropped}; test 에 NOISE {n_test_noise} 건 유지 (rejection 평가용)"
-    )
-
-    show_stats("train", train_kept)
-    show_stats("val", val_kept)
+    show_stats("train", train)
+    show_stats("val", val)
     show_stats("test", test)
 
-    write_jsonl(C.DATA_DIR / "train.jsonl", train_kept)
-    write_jsonl(C.DATA_DIR / "val.jsonl", val_kept)
+    write_jsonl(C.DATA_DIR / "train.jsonl", train)
+    write_jsonl(C.DATA_DIR / "val.jsonl", val)
     write_jsonl(C.DATA_DIR / "test.jsonl", test)
 
-    # class weights — 3-class training space
-    counts = Counter(r["label_id"] for r in train_kept)
-    total = max(len(train_kept), 1)
+    counts = Counter(r["label_id"] for r in train)
+    total = max(len(train), 1)
     weights = [total / (C.NUM_LABELS * max(counts.get(i, 0), 1))
                for i in range(C.NUM_LABELS)]
     (C.DATA_DIR / "class_weights.json").write_text(
         json.dumps(weights, ensure_ascii=False), encoding="utf-8"
     )
-    print("\nclass weights (train, 3-class):")
+    print("\nclass weights (train):")
     for i, w in enumerate(weights):
-        print(f"  {C.TRAINING_ID2LABEL[i]:18s} n={counts.get(i, 0):5d}  w={w:.3f}")
+        print(f"  {C.ID2LABEL[i]:18s} n={counts.get(i, 0):5d}  w={w:.3f}")
     print(f"\nartifacts → {C.DATA_DIR}")
 
 

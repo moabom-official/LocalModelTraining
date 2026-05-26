@@ -21,36 +21,26 @@ DATA_DIR = OUTPUT_DIR / "data"
 MODEL_DIR = OUTPUT_DIR / "model"
 LOG_DIR = OUTPUT_DIR / "logs"
 
-# ---- Labels (dual scheme: 3-class multi-label training, 4-class output) ----
-# Strategy: NOISE 는 양성 클래스로 학습하지 않고, 추론 시 **per-class sigmoid**
-# 최댓값이 REJECTION_THRESHOLD 미만이면 NOISE 로 분류. 2026-05-26 변경 —
-# softmax + threshold 접근은 OOD overconfidence 로 NOISE F1=0.034 까지 떨어짐.
-# softmax 는 확률 합=1 강제 → 모델에 "셋 다 아님" 출구가 없음.
-# 해결: per-class **sigmoid** head + BCE loss → 각 클래스 독립 확률 →
-# 셋 다 < 임계값이면 NOISE.
+# ---- Labels (4-class direct training) --------------------------------------
+# 단일 4-class 학습 — NOISE 를 양성 클래스로 직접 학습.
+# 진화 히스토리:
+#   - v1 5-class : PO / VR / CHATTER / Q / OFF_TOPIC
+#   - v2 4-class : PO / VR / Q / NOISE  (CHATTER + OFF_TOPIC 통합)  ← 현재
+#   - v3 3-class : NOISE 를 학습에서 제외 + softmax rejection      → NOISE F1=0.034 실패
+#   - v4 3-class : 동일 구조 + sigmoid BCE                          → NOISE F1=0.0 더 실패
+# 결론: NOISE 도 양성 클래스로 직접 학습이 가장 안정적. NOISE F1=0.60 정체는
+# 데이터 보강(mine_noise.py / fetch_noise_groq.py)으로 해결.
 
-# 모델이 학습하는 양성 클래스 (3개)
-TRAINING_LABEL_NAMES = [
+LABEL_NAMES = [
     "PRODUCT_OPINION",
     "VIDEO_REACTION",
     "QUESTION",
+    "NOISE",
 ]
-TRAINING_LABEL2ID = {name: i for i, name in enumerate(TRAINING_LABEL_NAMES)}
-TRAINING_ID2LABEL = {i: name for i, name in enumerate(TRAINING_LABEL_NAMES)}
-NUM_LABELS = len(TRAINING_LABEL_NAMES)  # 모델 head 크기 (3)
-
-# 다운스트림(comment_filtering_agent / DB enum) 에 노출되는 4-class 라벨.
-# evaluate / 운영 추론 시 NOISE 가 합쳐진 형태로 보고됨.
+LABEL2ID = {name: i for i, name in enumerate(LABEL_NAMES)}
+ID2LABEL = {i: name for i, name in enumerate(LABEL_NAMES)}
+NUM_LABELS = len(LABEL_NAMES)
 NOISE_LABEL = "NOISE"
-OUTPUT_LABEL_NAMES = TRAINING_LABEL_NAMES + [NOISE_LABEL]
-OUTPUT_LABEL2ID = {name: i for i, name in enumerate(OUTPUT_LABEL_NAMES)}
-OUTPUT_ID2LABEL = {i: name for i, name in enumerate(OUTPUT_LABEL_NAMES)}
-
-# 하위 호환 alias — 기존 코드/문서가 LABEL_NAMES / LABEL2ID / ID2LABEL
-# 를 참조하는 경우 4-class 출력 라벨을 가리킴.
-LABEL_NAMES = OUTPUT_LABEL_NAMES
-LABEL2ID = OUTPUT_LABEL2ID
-ID2LABEL = OUTPUT_ID2LABEL
 
 # 입력 라벨이 구 5-class 체계(CHATTER / OFF_TOPIC)로 들어오면 자동으로 NOISE 로 통합.
 LEGACY_LABEL_REMAP = {
@@ -68,14 +58,6 @@ def remap_legacy_label(label: str | None) -> str | None:
     if label is None:
         return None
     return LEGACY_LABEL_REMAP.get(label, label)
-
-
-# ---- Rejection (open-set classification, sigmoid head) ---------------------
-# 추론 시 per-class **sigmoid** 최댓값이 이 값 미만이면 NOISE 로 분류.
-# softmax 와 의미가 다름 — sigmoid 0.5 = "이 클래스일 확률 50%". 셋 다 <τ면
-# 모델이 "어느 것도 충분히 확신 못 함" 을 표현 가능 (softmax 는 합=1 제약).
-# 운영 데이터 calibration 후 tune. baseline 0.5.
-REJECTION_THRESHOLD = 0.5
 
 # ---- Preprocess filters ----------------------------------------------------
 MIN_CONFIDENCE = 0.85

@@ -61,13 +61,8 @@ def load_class_weights(device: torch.device) -> torch.Tensor | None:
     return torch.tensor(w, dtype=torch.float, device=device)
 
 
-def evaluate(model, loader, device, pos_weight):
-    """Multi-label evaluation. val/train 데이터는 단일 라벨 (PO/VR/Q 중 1개)
-    이므로 argmax 로 정답 판정. loss 는 BCEWithLogits.
-
-    Args:
-        pos_weight: (num_labels,) tensor — BCE positive class weight (class imbalance 보정)
-    """
+def evaluate(model, loader, device, class_w):
+    """4-class evaluation. softmax + argmax 단일 라벨 분류, cross_entropy loss."""
     model.eval()
     total, correct, loss_sum = 0, 0, 0.0
     n = C.NUM_LABELS
@@ -82,10 +77,7 @@ def evaluate(model, loader, device, pos_weight):
                                 enabled=device.type == "cuda"):
                 logits = model(input_ids=ids, attention_mask=mask).logits
             logits_fp32 = logits.float()
-            labels_oh = F.one_hot(labels, num_classes=n).float()
-            loss = F.binary_cross_entropy_with_logits(
-                logits_fp32, labels_oh, pos_weight=pos_weight
-            )
+            loss = F.cross_entropy(logits_fp32, labels, weight=class_w)
             loss_sum += loss.item() * labels.size(0)
             preds = logits_fp32.argmax(-1)
             correct += (preds == labels).sum().item()
@@ -129,15 +121,12 @@ def main() -> None:
     torch.backends.cudnn.allow_tf32 = True
 
     tokenizer = AutoTokenizer.from_pretrained(C.BASE_MODEL)
-    # 3-class **multi-label** sigmoid head — NOISE 는 rejection 으로 처리.
-    # problem_type="multi_label_classification" 로 HF 가 sigmoid + BCE
-    # 의미로 모델을 구성 (model.config 메타에도 기록되어 추론 시 일관).
+    # 4-class single-label classification head (cross-entropy).
     model = AutoModelForSequenceClassification.from_pretrained(
         C.BASE_MODEL,
         num_labels=C.NUM_LABELS,
-        id2label=C.TRAINING_ID2LABEL,
-        label2id=C.TRAINING_LABEL2ID,
-        problem_type="multi_label_classification",
+        id2label=C.ID2LABEL,
+        label2id=C.LABEL2ID,
     ).to(device)
 
     train_ds = CommentDataset(C.DATA_DIR / "train.jsonl", tokenizer, C.MAX_SEQ_LEN)
@@ -202,22 +191,14 @@ def main() -> None:
             with torch.autocast(device_type=device.type, dtype=autocast_dtype,
                                 enabled=use_autocast):
                 logits = model(input_ids=ids, attention_mask=mask).logits
-                # Multi-label BCE: one-hot 변환 후 per-class sigmoid + BCE.
-                # 라벨 평활화: 정답 1.0 → (1 - α), 오답 0.0 → α / (n-1).
-                labels_oh = F.one_hot(labels, num_classes=C.NUM_LABELS).float()
-                if C.LABEL_SMOOTHING > 0:
-                    alpha = C.LABEL_SMOOTHING
-                    n = C.NUM_LABELS
-                    labels_oh = labels_oh * (1.0 - alpha) + (1.0 - labels_oh) * (alpha / (n - 1))
-                per_ex = F.binary_cross_entropy_with_logits(
+                per_ex = F.cross_entropy(
                     logits.float(),
-                    labels_oh,
-                    pos_weight=class_w,        # class imbalance 보정
+                    labels,
+                    weight=class_w,
+                    label_smoothing=C.LABEL_SMOOTHING,
                     reduction="none",
-                )  # (B, C)
-                # 클래스별 합산 후 per-example confidence weight 곱
-                per_ex_summed = per_ex.sum(dim=1)  # (B,)
-                loss = (per_ex_summed * w).mean() if w is not None else per_ex_summed.mean()
+                )
+                loss = (per_ex * w).mean() if w is not None else per_ex.mean()
             loss.backward()
             if C.GRADIENT_CLIP:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), C.GRADIENT_CLIP)
@@ -239,7 +220,7 @@ def main() -> None:
               f"train_loss={run_loss / max(seen, 1):.4f} "
               f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} "
               f"val_macro_f1={val_macro_f1:.4f}")
-        for cid, name in C.TRAINING_ID2LABEL.items():
+        for cid, name in C.ID2LABEL.items():
             print(f"  {name:18s} acc={per_class[cid]:.3f}  f1={val_f1s[cid]:.3f}")
 
         metrics_log.append({
@@ -261,9 +242,7 @@ def main() -> None:
                 json.dumps({
                     "base_model": C.BASE_MODEL,
                     "max_seq_len": C.MAX_SEQ_LEN,
-                    "label2id": C.TRAINING_LABEL2ID,
-                    "output_label2id": C.OUTPUT_LABEL2ID,
-                    "rejection_threshold": C.REJECTION_THRESHOLD,
+                    "label2id": C.LABEL2ID,
                     "best_val_macro_f1": best_f1,
                     "best_val_acc": val_acc,
                     "epoch": epoch,
