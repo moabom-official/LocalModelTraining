@@ -8,3 +8,7 @@ numpy
 
 # mine_noise.py only (GPT-4.1 teacher 마이닝). 학습/추론 자체에는 불필요.
 langchain-openai>=0.2
+
+# fetch_noise_groq.py only (YouTube + Groq Llama 마이닝). 학습/추론 자체에는 불필요.
+google-api-python-client>=2.100
+groq>=0.13
