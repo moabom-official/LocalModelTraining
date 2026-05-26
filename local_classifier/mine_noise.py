@@ -18,6 +18,18 @@
     python -m local_classifier.mine_noise --mode synthetic --count 500
     python -m local_classifier.mine_noise --mode label --input raw.jsonl
 
+필수 환경변수 (RunYourAI 게이트웨이 — OpenAI 호환 endpoint):
+    RUNYOURAI_API_KEY        (필수)
+    RUNYOURAI_BASE_URL       (기본 https://api.runyour.ai/v1)
+    RUNYOURAI_MODEL          (기본 openai/gpt-4.1-2025-04-14)
+
+또는 표준 OpenAI 사용 시:
+    OPENAI_API_KEY           (필수)
+    OPENAI_BASE_URL          (선택)
+    OPENAI_MODEL             (기본 gpt-4o)
+
+추가 의존성: pip install langchain-openai
+
 비용 추정 (GPT-4.1 ~$2 in / $8 out per 1M tokens):
     synthetic 500건  ≈  $0.30
     label 5000건    ≈  $0.60
@@ -109,16 +121,64 @@ def looks_like_noise(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def _get_llm(temperature: float):
-    # scripts.llm.get_chat_llm — 프로젝트 표준 진입점
-    sys.path.insert(0, str(REPO_ROOT))
+    """ChatOpenAI 인스턴스 — RunYourAI(OpenAI 호환) 또는 표준 OpenAI 지원.
+
+    환경변수 우선순위:
+      1. RUNYOURAI_API_KEY  → RunYourAI 게이트웨이 사용 (Moabom 운영 표준)
+      2. OPENAI_API_KEY     → 표준 OpenAI 사용
+    둘 다 없으면 RuntimeError.
+
+    `scripts.llm.get_chat_llm` 이 import 가능하면 그쪽을 우선 사용 (Moabom_Prototype
+    내부에서 호출 시). LocalModelTraining 같은 standalone 리포에서는 import 실패
+    하므로 직접 ChatOpenAI 생성.
+    """
+    import os
+
+    # 1) Moabom_Prototype 내부 호출이면 표준 진입점 우선 시도
     try:
+        sys.path.insert(0, str(REPO_ROOT))
         from scripts.llm import get_chat_llm  # type: ignore
-    except Exception as e:
+        return get_chat_llm(temperature=temperature, max_tokens=4000)
+    except (ImportError, ModuleNotFoundError):
+        pass  # standalone 리포 — 아래에서 직접 처리
+
+    # 2) standalone: 환경변수로 직접 ChatOpenAI 생성
+    try:
+        from langchain_openai import ChatOpenAI
+    except ImportError:
         raise RuntimeError(
-            f"scripts.llm.get_chat_llm 임포트 실패: {e}\n"
-            "RUNYOURAI_API_KEY / RUNYOURAI_BASE_URL / RUNYOURAI_MODEL 환경변수 확인."
+            "langchain-openai 미설치. 다음 실행:\n"
+            "  pip install langchain-openai"
         )
-    return get_chat_llm(temperature=temperature, max_tokens=4000)
+
+    runyour_key = os.environ.get("RUNYOURAI_API_KEY")
+    openai_key = os.environ.get("OPENAI_API_KEY")
+
+    if runyour_key:
+        return ChatOpenAI(
+            api_key=runyour_key,
+            base_url=os.environ.get("RUNYOURAI_BASE_URL", "https://api.runyour.ai/v1"),
+            model=os.environ.get("RUNYOURAI_MODEL", "openai/gpt-4.1-2025-04-14"),
+            temperature=temperature,
+            max_tokens=4000,
+        )
+    if openai_key:
+        kwargs: dict = {
+            "api_key": openai_key,
+            "model": os.environ.get("OPENAI_MODEL", "gpt-4o"),
+            "temperature": temperature,
+            "max_tokens": 4000,
+        }
+        base_url = os.environ.get("OPENAI_BASE_URL")
+        if base_url:
+            kwargs["base_url"] = base_url
+        return ChatOpenAI(**kwargs)
+
+    raise RuntimeError(
+        "API key 환경변수 미설정. RUNYOURAI_API_KEY 또는 OPENAI_API_KEY 중 하나 필요.\n"
+        "  export RUNYOURAI_API_KEY=...     # RunYourAI (권장)\n"
+        "  export OPENAI_API_KEY=...        # 또는 표준 OpenAI"
+    )
 
 
 def _call_llm_json(llm, system: str, user: str, retries: int = 3) -> list[dict]:
