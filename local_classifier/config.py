@@ -17,9 +17,7 @@ OUTPUT_DIR = Path(
         str(REPO_ROOT / "local_classifier" / "artifacts"),
     )
 )
-DATA_DIR = OUTPUT_DIR / "data"
-MODEL_DIR = OUTPUT_DIR / "model"
-LOG_DIR = OUTPUT_DIR / "logs"
+DATA_DIR = OUTPUT_DIR / "data"      # 모델 공유 — 전처리 결과는 모델 무관
 
 # ---- Labels (4-class direct training) --------------------------------------
 # 단일 4-class 학습 — NOISE 를 양성 클래스로 직접 학습.
@@ -72,8 +70,20 @@ TEST_RATIO = 0.10
 SEED = 42
 
 # ---- Model -----------------------------------------------------------------
-BASE_MODEL = "klue/roberta-large"       # 340M; swap back to roberta-base to compare
+# BASE_MODEL 환경변수로 override 가능 → 같은 데이터로 여러 모델 비교 학습.
+# 한국어 옵션:
+#   klue/roberta-large                   (340M, KLUE팀, 기본)
+#   klue/roberta-base                    (110M)
+#   team-lucid/deberta-v3-base-korean    (180M, Korean DeBERTa-v3)
+#   microsoft/mdeberta-v3-base           (280M, multilingual DeBERTa)
+BASE_MODEL = os.environ.get("BASE_MODEL", "klue/roberta-large")
 MAX_SEQ_LEN = 128
+
+# 모델별 산출물 디렉토리 분리 (artifacts/<slug>/model|logs/).
+# DATA_DIR 은 공유 — 같은 split 으로 fair comparison.
+MODEL_SLUG = BASE_MODEL.replace("/", "__").replace(":", "_")
+MODEL_DIR = OUTPUT_DIR / MODEL_SLUG / "model"
+LOG_DIR = OUTPUT_DIR / MODEL_SLUG / "logs"
 
 # ---- Training (A40 48GB) ---------------------------------------------------
 TRAIN_BATCH_SIZE = 32                   # large@128 seq — safe on A40, no OOM

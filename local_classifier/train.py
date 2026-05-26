@@ -108,6 +108,9 @@ def evaluate(model, loader, device, class_w):
 def main() -> None:
     set_all_seeds(C.SEED)
     print(f"seed={C.SEED}  (deterministic mode)")
+    print(f"BASE_MODEL = {C.BASE_MODEL}")
+    print(f"MODEL_DIR  = {C.MODEL_DIR}")
+    print(f"LOG_DIR    = {C.LOG_DIR}")
 
     if not torch.cuda.is_available():
         print("[warn] CUDA not available — training on CPU will be very slow.")

@@ -22,7 +22,9 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.backends.cuda.matmul.allow_tf32 = True
 
+    print(f"BASE_MODEL = {C.BASE_MODEL}")
     model_path = C.MODEL_DIR / "best"
+    print(f"model_path = {model_path}")
     if not model_path.exists():
         raise FileNotFoundError(f"model not found: {model_path}. Run train.py first.")
     tokenizer = AutoTokenizer.from_pretrained(model_path)

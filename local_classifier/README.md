@@ -57,6 +57,54 @@ remap_legacy_label("QUESTION")   # → "QUESTION" (unchanged)
 
 운영 라벨 분포 (운영 export 기준): CHATTER 405 + OFF_TOPIC 245 = **NOISE 650 (10%)**.
 
+## 모델 비교 (BASE_MODEL 환경변수)
+
+`BASE_MODEL` 환경변수로 backbone 갈아끼우면 같은 데이터 split 으로 여러 모델 비교 학습 가능. 출력은 `artifacts/<slug>/{model,logs}/` 로 자동 분리됨.
+
+```bash
+# 1) 데이터 준비 (한 번만, 모델 무관)
+python -m local_classifier.prepare_dataset
+
+# 2-A) KLUE-RoBERTa-large (기본)
+python -m local_classifier.train
+python -m local_classifier.evaluate
+
+# 2-B) Korean DeBERTa-v3-base
+BASE_MODEL=team-lucid/deberta-v3-base-korean python -m local_classifier.train
+BASE_MODEL=team-lucid/deberta-v3-base-korean python -m local_classifier.evaluate
+
+# 2-C) (선택) Multilingual DeBERTa-v3
+BASE_MODEL=microsoft/mdeberta-v3-base python -m local_classifier.train
+BASE_MODEL=microsoft/mdeberta-v3-base python -m local_classifier.evaluate
+
+# 3) 비교 표 출력
+python -m local_classifier.compare_models
+```
+
+결과는 `artifacts/` 에 모델별로 떨어짐:
+```
+artifacts/
+├── data/                                       # 공유 (전처리 결과)
+├── klue__roberta-large/
+│   ├── model/best/                            # 학습된 가중치
+│   └── logs/{train_metrics,test_summary}.json
+├── team-lucid__deberta-v3-base-korean/
+│   └── ...
+└── microsoft__mdeberta-v3-base/
+    └── ...
+```
+
+권장 비교 후보 (한국어):
+
+| Model | Params | 특징 |
+|---|---:|---|
+| `klue/roberta-large` | 340M | KLUE팀, 현재 기본 |
+| `klue/roberta-base` | 110M | 3× 빠름, -1~2%p |
+| `team-lucid/deberta-v3-base-korean` | 180M | 한국어 DeBERTa-v3, disentangled attention |
+| `microsoft/mdeberta-v3-base` | 280M | 다국어 DeBERTa, 한국어 단일보다 약함 |
+
+학습 hyperparameter 는 공통 — fair comparison. DeBERTa-v3 가 RoBERTa 대비 lr 살짝 더 높이면 (2e-5) 좋을 수 있으나 1차 비교에서는 동일 1e-5.
+
 ## 환경
 
 NVIDIA **A40 (48GB, Ampere sm_86)** 서버 기준.
