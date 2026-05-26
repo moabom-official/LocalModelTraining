@@ -88,7 +88,9 @@ LOG_DIR = OUTPUT_DIR / MODEL_SLUG / "logs"
 # ---- Training (A40 48GB) ---------------------------------------------------
 TRAIN_BATCH_SIZE = 32                   # large@128 seq — safe on A40, no OOM
 EVAL_BATCH_SIZE = 64
-LEARNING_RATE = 1e-5                    # RoBERTa-large standard; 2e-5 often unstable
+# 모델별 권장: RoBERTa-large 1e-5, RoBERTa-base 2e-5, DeBERTa-v3 2~3e-5.
+# LEARNING_RATE 환경변수로 override 가능 → 모델별 fine-tuning.
+LEARNING_RATE = float(os.environ.get("LEARNING_RATE", "1e-5"))
 WEIGHT_DECAY = 0.01
 WARMUP_RATIO = 0.1
 NUM_EPOCHS = 4                          # best val_F1 가 epoch 4 에서 plateau (관측 기반)

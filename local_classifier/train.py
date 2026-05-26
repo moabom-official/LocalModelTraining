@@ -108,9 +108,11 @@ def evaluate(model, loader, device, class_w):
 def main() -> None:
     set_all_seeds(C.SEED)
     print(f"seed={C.SEED}  (deterministic mode)")
-    print(f"BASE_MODEL = {C.BASE_MODEL}")
-    print(f"MODEL_DIR  = {C.MODEL_DIR}")
-    print(f"LOG_DIR    = {C.LOG_DIR}")
+    print(f"BASE_MODEL    = {C.BASE_MODEL}")
+    print(f"LEARNING_RATE = {C.LEARNING_RATE}")
+    print(f"NUM_EPOCHS    = {C.NUM_EPOCHS}")
+    print(f"MODEL_DIR     = {C.MODEL_DIR}")
+    print(f"LOG_DIR       = {C.LOG_DIR}")
 
     if not torch.cuda.is_available():
         print("[warn] CUDA not available — training on CPU will be very slow.")
@@ -246,6 +248,8 @@ def main() -> None:
                     "base_model": C.BASE_MODEL,
                     "max_seq_len": C.MAX_SEQ_LEN,
                     "label2id": C.LABEL2ID,
+                    "learning_rate": C.LEARNING_RATE,
+                    "num_epochs_planned": C.NUM_EPOCHS,
                     "best_val_macro_f1": best_f1,
                     "best_val_acc": val_acc,
                     "epoch": epoch,

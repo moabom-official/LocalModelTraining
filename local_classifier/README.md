@@ -69,12 +69,12 @@ python -m local_classifier.prepare_dataset
 python -m local_classifier.train
 python -m local_classifier.evaluate
 
-# 2-B) Korean DeBERTa-v3-base
-BASE_MODEL=team-lucid/deberta-v3-base-korean python -m local_classifier.train
+# 2-B) Korean DeBERTa-v3-base — DeBERTa 는 lr 2~3e-5 필요 (RoBERTa 1e-5 와 다름)
+LEARNING_RATE=2e-5 BASE_MODEL=team-lucid/deberta-v3-base-korean python -m local_classifier.train
 BASE_MODEL=team-lucid/deberta-v3-base-korean python -m local_classifier.evaluate
 
 # 2-C) (선택) Multilingual DeBERTa-v3
-BASE_MODEL=microsoft/mdeberta-v3-base python -m local_classifier.train
+LEARNING_RATE=2e-5 BASE_MODEL=microsoft/mdeberta-v3-base python -m local_classifier.train
 BASE_MODEL=microsoft/mdeberta-v3-base python -m local_classifier.evaluate
 
 # 3) 비교 표 출력
