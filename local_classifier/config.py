@@ -11,44 +11,51 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LABELS_DIR = REPO_ROOT / "comment_labels"
 INPUT_JSONL = LABELS_DIR / "labeled_gpt41_azure.jsonl"
 
-OUTPUT_DIR = Path(
+_ARTIFACTS_ROOT = Path(
     os.environ.get(
         "LOCAL_CLASSIFIER_OUTPUT",
         str(REPO_ROOT / "local_classifier" / "artifacts"),
     )
 )
-DATA_DIR = OUTPUT_DIR / "data"      # 모델 공유 — 전처리 결과는 모델 무관
+# 라벨 체계별로 산출물 분리 (4_labels / 3_labels 비교 시 덮어쓰기 방지).
+# LABEL_SCHEME 환경변수로 override 가능.
+LABEL_SCHEME = os.environ.get("LABEL_SCHEME", "3_labels")
+OUTPUT_DIR = _ARTIFACTS_ROOT / LABEL_SCHEME
+DATA_DIR = OUTPUT_DIR / "data"      # 모델 공유 — 전처리 결과는 모델 무관 (라벨 체계 종속)
 
-# ---- Labels (4-class direct training) --------------------------------------
-# 단일 4-class 학습 — NOISE 를 양성 클래스로 직접 학습.
+# ---- Labels (3-class direct training, NOISE → VIDEO_REACTION 통합) ---------
+# 단일 3-class 학습. NOISE / CHATTER / OFF_TOPIC 모두 VIDEO_REACTION 으로 흡수.
+# 근거: NOISE 와 VR 모두 agent decision 에서 EXCLUDE 액션. 운영 구분 가치 낮음.
+# 4-class 학습 시 NOISE F1=0.667 가 macro 끌어내림 → 통합으로 metric 개선.
 # 진화 히스토리:
-#   - v1 5-class : PO / VR / CHATTER / Q / OFF_TOPIC
-#   - v2 4-class : PO / VR / Q / NOISE  (CHATTER + OFF_TOPIC 통합)  ← 현재
-#   - v3 3-class : NOISE 를 학습에서 제외 + softmax rejection      → NOISE F1=0.034 실패
-#   - v4 3-class : 동일 구조 + sigmoid BCE                          → NOISE F1=0.0 더 실패
-# 결론: NOISE 도 양성 클래스로 직접 학습이 가장 안정적. NOISE F1=0.60 정체는
-# 데이터 보강(mine_noise.py / fetch_noise_groq.py)으로 해결.
+#   - v1 5-class : PO / VR / CHATTER / Q / OFF_TOPIC               → baseline
+#   - v2 4-class : PO / VR / Q / NOISE (CHATTER+OFF_TOPIC 통합)    → macro 0.79
+#   - v3 3-class rejection 실험들 (softmax / sigmoid BCE)          → NOISE F1=0.0 실패
+#   - v4 4-class + 데이터 보강 (NOISE 484→541)                     → macro 0.795 (best)
+#   - v5 3-class : NOISE → VIDEO_REACTION 통합                      ← 현재
+# 운영 (comment_filtering_agent / DB enum) 은 4-class 그대로 유지. 분류기 출력만 3-class.
 
 LABEL_NAMES = [
     "PRODUCT_OPINION",
-    "VIDEO_REACTION",
+    "VIDEO_REACTION",   # 구 NOISE / CHATTER / OFF_TOPIC 통합 흡수
     "QUESTION",
-    "NOISE",
 ]
 LABEL2ID = {name: i for i, name in enumerate(LABEL_NAMES)}
 ID2LABEL = {i: name for i, name in enumerate(LABEL_NAMES)}
 NUM_LABELS = len(LABEL_NAMES)
-NOISE_LABEL = "NOISE"
+NOISE_LABEL = "NOISE"  # mine_noise.py 호환용 상수 (학습엔 안 쓰이고 remap 됨)
 
-# 입력 라벨이 구 5-class 체계(CHATTER / OFF_TOPIC)로 들어오면 자동으로 NOISE 로 통합.
+# 구 NOISE / CHATTER / OFF_TOPIC 라벨이 입력으로 들어오면 자동으로 VR 로 흡수.
+# 4-class 시절 마이닝한 jsonl 그대로 사용 가능.
 LEGACY_LABEL_REMAP = {
-    "CHATTER": "NOISE",
-    "OFF_TOPIC": "NOISE",
+    "CHATTER":   "VIDEO_REACTION",
+    "OFF_TOPIC": "VIDEO_REACTION",
+    "NOISE":     "VIDEO_REACTION",
 }
 
 
 def remap_legacy_label(label: str | None) -> str | None:
-    """구 5-class 라벨(CHATTER / OFF_TOPIC)을 NOISE 로 자동 통합.
+    """구 NOISE / CHATTER / OFF_TOPIC 을 VIDEO_REACTION 으로 자동 흡수.
 
     None 입력은 None 반환. 알 수 없는 라벨은 그대로 통과 → 후속 membership
     체크 단계에서 제외됨.

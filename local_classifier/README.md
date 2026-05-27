@@ -1,8 +1,15 @@
-# KLUE-RoBERTa Distill — 4-class 댓글 분류기
+# KLUE-RoBERTa Distill — 3-class 댓글 분류기
 
 GPT-4.1 teacher 라벨(`comment_labels/labeled_gpt41_azure.jsonl`, 6,375건)로 `klue/roberta-large`를 distill하고, 운영에서는 confidence-gated cascade(`local 1차 → 저신뢰만 GPT-4.1 fallback`)로 호출비를 줄이는 모듈.
 
-라벨: **PRODUCT_OPINION / VIDEO_REACTION / QUESTION / NOISE** (4-class). softmax + argmax 직접 학습.
+라벨: **PRODUCT_OPINION / VIDEO_REACTION / QUESTION** (3-class). softmax + argmax 직접 학습.
+
+> **NOISE 통합 (2026-05-27)**: 구 NOISE / CHATTER / OFF_TOPIC 라벨은 모두 **VIDEO_REACTION** 으로 흡수. 근거:
+> - agent decision engine 에서 NOISE 와 VR 모두 `EXCLUDE` 액션 — 운영 구분 가치 낮음
+> - 4-class 학습 시 NOISE F1=0.667 가 macro 끌어내림 (병목)
+> - 통합 후 학습 데이터 VR 835 → 1319 (+58%) → 학습 신호 강화
+>
+> 운영 (`comment_filtering_agent` / DB enum) 은 4-class 그대로 유지. 분류기 출력만 3-class.
 
 > **설계 진화 히스토리 (참고)**
 > 1. 5-class 직접 학습 (CHATTER / OFF_TOPIC 분리) → baseline
