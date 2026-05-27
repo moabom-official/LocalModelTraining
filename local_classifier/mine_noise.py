@@ -1,29 +1,34 @@
 """클래스별 라벨 데이터 마이닝 — GPT-4.1 teacher (via RunYourAI 게이트웨이).
 
-4-class 학습의 약한 클래스(NOISE F1=0.667, VIDEO_REACTION F1=0.744 등)
-support 증가를 위한 데이터 보강 도구.
+4-class 학습의 약한 클래스(NOISE / VIDEO_REACTION) support 증가용 도구.
 
-두 가지 모드:
+세 가지 모드:
 
-  1. synthetic  : GPT-4.1 로 다양한 카테고리의 합성 댓글 생성 (입력 불필요)
-                  --label 로 라벨 지정:
-                    NOISE          : 단순 반응/밈/BGM/잡담/광고/욕설/다른 주제 (8 카테고리)
-                    VIDEO_REACTION : 영상칭찬/설명력/편집/자막/톤발성/촬영/구독요청/길이 (8 카테고리)
+  1. synthetic  : GPT-4.1 로 카테고리별 합성 댓글 생성 (입력 불필요)
+                  NOISE 권장. VR 은 stereotype 위험 → youtube 모드 권장.
 
-  2. label      : 사용자가 제공한 raw 댓글 JSONL 을 GPT-4.1 로 4-class 분류 후
-                  NOISE 만 추출 (현재는 NOISE 만 지원)
+  2. label      : 사용자가 제공한 raw 댓글 JSONL 을 GPT-4.1 로 분류 후
+                  --label 지정 라벨만 추출 (NOISE / VR 등 자유)
+
+  3. youtube    : ★ 실제 YouTube 댓글 fetch + GPT-4.1 분류 + 라벨 추출 ★
+                  합성 데이터의 stereotype 한계를 우회.
+                  video_ids 미지정 시 labeled_gpt41_azure.jsonl 에서 자동 추출.
 
 출력 형식은 ``comment_labels/labeled_gpt41_azure.jsonl`` 과 호환되며,
 별도 파일(`labeled_gpt41_azure_<label>_extra.jsonl`)에 append 한다.
 검토 후 본 라벨 파일에 cat 으로 합치면 `prepare_dataset` 가 자동 인식.
 
 사용 예:
-    # NOISE 합성 (기본)
-    python -m local_classifier.mine_noise --mode synthetic --count 500
-    # VR 합성
-    python -m local_classifier.mine_noise --mode synthetic --label VIDEO_REACTION --count 400
-    # raw 댓글 NOISE 라벨링
-    python -m local_classifier.mine_noise --mode label --input raw.jsonl
+    # NOISE 합성
+    python -m local_classifier.mine_noise --mode synthetic --label NOISE --count 500
+
+    # ★ VR 실 댓글 마이닝 (권장)
+    python -m local_classifier.mine_noise --mode youtube --label VIDEO_REACTION \\
+        --max-videos 50 --per-video 100 --target 300
+
+    # ★ NOISE 실 댓글 마이닝
+    python -m local_classifier.mine_noise --mode youtube --label NOISE \\
+        --max-videos 30 --target 300
 
 필수 환경변수 (RunYourAI 게이트웨이 — OpenAI 호환 endpoint):
     RUNYOURAI_API_KEY        (필수)
@@ -45,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import re
 import sys
 import time
@@ -69,6 +75,20 @@ def _system_prompt(label: str, definition: str) -> str:
         f"{label} 정의: {definition}\n\n"
         f'반드시 JSON 배열로만 응답. 각 원소는 {{"text": "..."}} 형식. 다른 키 금지.'
     )
+
+
+CLASSIFY_SYSTEM_PROMPT = """당신은 한국 유튜브 테크 리뷰 영상의 댓글을 4-class 로 분류하는 어노테이터입니다.
+
+라벨:
+- PRODUCT_OPINION: 제품 자체(성능/배터리/가격/디자인/화면 등)에 대한 평가
+- VIDEO_REACTION : 영상·리뷰어·편집·자막·촬영·톤·구독 등 영상 제작물에 대한 반응
+- QUESTION       : 제품 관련 질문 (영상 자체 질문 아님)
+- NOISE          : 위 3개 모두 해당 안 됨 (단순반응·밈·음악질문·잡담·광고·욕설·외모언급 등)
+
+각 댓글에 대해 라벨 + confidence(0.0~1.0) + 짧은 이유 출력.
+반드시 JSON 배열로만 응답. 각 원소:
+{"i": <index>, "label": "...", "confidence": 0.95, "reason": "..."}
+다른 텍스트 금지."""
 
 
 # 라벨별 정의 + 카테고리 (label-aware 합성)
@@ -285,14 +305,62 @@ def generate_synthetic(count: int, batch_id: str, label: str = "NOISE") -> list[
 # Label mode — 외부 raw 댓글 라벨링 후 NOISE 만 추출
 # ---------------------------------------------------------------------------
 
+def _classify_batch(
+    candidates: list[dict],
+    target_label: str,
+    batch_size: int,
+    min_confidence: float,
+) -> list[dict]:
+    """후보 댓글 배치를 GPT-4.1 로 4-class 분류 후 target_label 만 추출."""
+    if not candidates:
+        return []
+    llm = _get_llm(temperature=0.0)
+    out: list[dict] = []
+    n_batches = (len(candidates) + batch_size - 1) // batch_size
+    for bi, start in enumerate(range(0, len(candidates), batch_size), 1):
+        batch = candidates[start:start + batch_size]
+        items = "\n".join(f"  {i}. {r['text']}" for i, r in enumerate(batch))
+        user = f"분류할 댓글 {len(batch)}개:\n{items}\n\nJSON 배열로 출력."
+        try:
+            arr = _call_llm_json(llm, CLASSIFY_SYSTEM_PROMPT, user)
+        except Exception as e:
+            print(f"  batch {bi}/{n_batches} FAIL: {e}")
+            continue
+        for entry in arr:
+            try:
+                idx = int(entry["i"])
+                label = entry["label"]
+                conf = float(entry["confidence"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if label != target_label:
+                continue
+            if conf < min_confidence:
+                continue
+            if not (0 <= idx < len(batch)):
+                continue
+            src = batch[idx]
+            out.append(_make_record(
+                text=src["text"],
+                comment_id=src["comment_id"],
+                video_id=src["video_id"],
+                confidence=conf,
+                reasoning=entry.get("reason", "")[:200],
+                label=target_label,
+            ))
+        print(f"  batch {bi}/{n_batches}  누적 {target_label} 확정: {len(out)}")
+    return out
+
+
 def label_external(
     input_path: Path,
+    target_label: str = "NOISE",
     batch_size: int = 25,
     apply_heuristic: bool = True,
     text_field: str = "text",
     video_field: str = "video_id",
 ) -> list[dict]:
-    """raw 댓글 JSONL 을 GPT-4.1 로 라벨링 → NOISE 만 반환."""
+    """raw 댓글 JSONL 을 GPT-4.1 로 분류 → target_label 만 반환."""
     raw: list[dict] = []
     with open(input_path, encoding="utf-8") as f:
         for line in f:
@@ -307,50 +375,159 @@ def label_external(
                         "comment_id": rec.get("comment_id") or str(uuid.uuid4())[:12]})
     print(f"loaded raw comments: {len(raw)}")
 
-    if apply_heuristic:
+    if apply_heuristic and target_label == "NOISE":
         before = len(raw)
         raw = [r for r in raw if looks_like_noise(r["text"])]
-        print(f"heuristic pre-filter: {before} -> {len(raw)} candidates "
-              f"(short ≤{SHORT_THRESHOLD} OR keyword OR repeated chars)")
+        print(f"NOISE heuristic pre-filter: {before} -> {len(raw)} candidates")
 
-    if not raw:
+    return _classify_batch(raw, target_label, batch_size, C.MIN_CONFIDENCE)
+
+
+# ---------------------------------------------------------------------------
+# YouTube fetch mode
+# ---------------------------------------------------------------------------
+
+def _video_ids_from_labeled() -> list[str]:
+    """기존 labeled_gpt41_azure.jsonl 에서 unique video_id 추출."""
+    path = REPO_ROOT / "comment_labels" / "labeled_gpt41_azure.jsonl"
+    if not path.exists():
+        return []
+    vids: set[str] = set()
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            vid = rec.get("video_id")
+            if vid and not str(vid).startswith(("synthetic", "synth-")):
+                vids.add(str(vid))
+    return sorted(vids)
+
+
+def _fetch_youtube_comments(video_ids: list[str], per_video: int = 100) -> list[dict]:
+    """YouTube Data API v3 — top-level 댓글 fetch. order='time'."""
+    import os
+    try:
+        from googleapiclient.discovery import build
+        from googleapiclient.errors import HttpError
+    except ImportError:
+        raise RuntimeError(
+            "google-api-python-client 미설치.  pip install google-api-python-client"
+        )
+    api_key = os.environ.get("YOUTUBE_API_KEY")
+    if not api_key:
+        raise RuntimeError("YOUTUBE_API_KEY 환경변수 필수.")
+
+    yt = build("youtube", "v3", developerKey=api_key, cache_discovery=False)
+    out: list[dict] = []
+    for vid in video_ids:
+        fetched = 0
+        next_page = None
+        while fetched < per_video:
+            try:
+                resp = yt.commentThreads().list(
+                    part="snippet",
+                    videoId=vid,
+                    maxResults=min(100, per_video - fetched),
+                    pageToken=next_page,
+                    textFormat="plainText",
+                    order="time",
+                ).execute()
+            except HttpError as e:
+                status = getattr(e, "resp", None) and e.resp.status
+                print(f"  [{vid}] skip (HTTP {status})")
+                break
+            for item in resp.get("items", []):
+                snip = item["snippet"]["topLevelComment"]["snippet"]
+                text = (snip.get("textDisplay") or "").strip()
+                if not text:
+                    continue
+                out.append({
+                    "comment_id": item["id"],
+                    "video_id": vid,
+                    "text": text,
+                    "like_count": snip.get("likeCount", 0),
+                    "reply_count": item["snippet"].get("totalReplyCount", 0),
+                })
+                fetched += 1
+            next_page = resp.get("nextPageToken")
+            if not next_page:
+                break
+        print(f"  [{vid}] fetched: {fetched}")
+    return out
+
+
+def fetch_from_youtube(
+    target_label: str,
+    video_ids: list[str] | None = None,
+    per_video: int = 100,
+    max_videos: int = 30,
+    target: int = 300,
+    batch_size: int = 25,
+    apply_heuristic: bool = False,
+    seed: int = 42,
+) -> list[dict]:
+    """YouTube 실 댓글 fetch → GPT-4.1 4-class 분류 → target_label 만 추출.
+
+    합성 데이터의 stereotype 문제 우회. 실제 운영 분포에 가까운 댓글만 학습 데이터화.
+    """
+    if not video_ids:
+        video_ids = _video_ids_from_labeled()
+    if not video_ids:
+        raise RuntimeError(
+            "video_ids 0건. --video-ids 또는 --video-ids-file 로 직접 제공하거나, "
+            "comment_labels/labeled_gpt41_azure.jsonl 이 있어야 자동 추출 가능."
+        )
+    rng = random.Random(seed)
+    rng.shuffle(video_ids)
+    video_ids = video_ids[:max_videos]
+    print(f"video IDs: {len(video_ids)} (max {max_videos})")
+
+    print(f"\n[1] YouTube fetch (~{per_video}/video)")
+    raw = _fetch_youtube_comments(video_ids, per_video=per_video)
+    print(f"  total fetched: {len(raw)}")
+
+    # 길이 필터
+    raw = [r for r in raw if C.MIN_TEXT_LEN <= len(r["text"]) <= C.MAX_TEXT_LEN]
+    # 텍스트 중복 제거
+    seen: set[str] = set()
+    dedup: list[dict] = []
+    for r in raw:
+        key = r["text"].strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(r)
+    print(f"  after length + dedup: {len(dedup)}")
+    if not dedup:
         return []
 
-    llm = _get_llm(temperature=0.0)
-    out: list[dict] = []
-    for start in range(0, len(raw), batch_size):
-        batch = raw[start:start + batch_size]
-        items = "\n".join(f"  {i}. {r['text']}" for i, r in enumerate(batch))
-        user = f"분류할 댓글 {len(batch)}개:\n{items}\n\nJSON 배열로 출력."
-        print(f"  batch {start//batch_size + 1}/{(len(raw)-1)//batch_size + 1} ({len(batch)}건)")
-        try:
-            arr = _call_llm_json(llm, LABEL_SYSTEM_PROMPT, user)
-        except Exception as e:
-            print(f"  batch FAIL: {e}")
-            continue
-        for entry in arr:
-            try:
-                idx = int(entry["i"])
-                label = entry["label"]
-                conf = float(entry["confidence"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if label != "NOISE":
-                continue
-            if conf < C.MIN_CONFIDENCE:
-                continue
-            if not (0 <= idx < len(batch)):
-                continue
-            src = batch[idx]
-            out.append(_make_record(
-                text=src["text"],
-                comment_id=src["comment_id"],
-                video_id=src["video_id"],
-                confidence=conf,
-                reasoning=entry.get("reason", "")[:200],
-            ))
-        print(f"  누적 NOISE 확정: {len(out)}")
-    return out
+    # 휴리스틱 (NOISE 만 의미 있음, VR 은 적용 안 함)
+    candidates = dedup
+    if apply_heuristic and target_label == "NOISE":
+        before = len(candidates)
+        candidates = [r for r in candidates if looks_like_noise(r["text"])]
+        print(f"  NOISE heuristic pre-filter: {before} -> {len(candidates)}")
+
+    if not candidates:
+        return []
+
+    # GPT-4.1 분류
+    print(f"\n[2] GPT-4.1 classification (batch {batch_size})")
+    classified = _classify_batch(candidates, target_label, batch_size, C.MIN_CONFIDENCE)
+    print(f"  total {target_label} confirmed (conf >= {C.MIN_CONFIDENCE}): {len(classified)}")
+
+    if len(classified) > target:
+        # like_count 높은 것 우선 (자연스러운 댓글)
+        like_map = {r["comment_id"]: r.get("like_count", 0) for r in dedup}
+        classified.sort(key=lambda r: like_map.get(r["comment_id"], 0), reverse=True)
+        classified = classified[:target]
+        print(f"  trimmed to target {target}")
+    return classified
 
 
 # ---------------------------------------------------------------------------
@@ -408,9 +585,10 @@ def write_jsonl(path: Path, records: list[dict], append: bool) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--mode", choices=["synthetic", "label"], required=True)
-    ap.add_argument("--label", choices=list(LABEL_DEFINITIONS.keys()), default="NOISE",
-                    help="(synthetic) 생성할 라벨. NOISE 또는 VIDEO_REACTION")
+    ap.add_argument("--mode", choices=["synthetic", "label", "youtube"], required=True,
+                    help="synthetic=GPT 합성, label=JSONL 분류, youtube=YouTube fetch+분류")
+    ap.add_argument("--label", default="NOISE",
+                    help="추출할 라벨. NOISE / VIDEO_REACTION / PRODUCT_OPINION / QUESTION")
     ap.add_argument("--count", type=int, default=500,
                     help="(synthetic) 생성 댓글 수")
     ap.add_argument("--input", type=str, default=None,
@@ -418,13 +596,31 @@ def main() -> None:
     ap.add_argument("--text-field", default="text")
     ap.add_argument("--video-field", default="video_id")
     ap.add_argument("--no-heuristic", action="store_true",
-                    help="(label) 휴리스틱 pre-filter 건너뛰기 — 전수 라벨링")
+                    help="(label/youtube) NOISE 휴리스틱 pre-filter 건너뛰기")
     ap.add_argument("--batch-size", type=int, default=25)
+    # youtube 모드 옵션
+    ap.add_argument("--video-ids", type=str, default=None,
+                    help="(youtube) 콤마로 구분된 video ID 리스트")
+    ap.add_argument("--video-ids-file", type=str, default=None,
+                    help="(youtube) 한 줄에 하나씩 video ID 가 있는 파일")
+    ap.add_argument("--per-video", type=int, default=100,
+                    help="(youtube) 영상 당 fetch 댓글 수")
+    ap.add_argument("--max-videos", type=int, default=30,
+                    help="(youtube) 처리할 영상 최대 개수")
+    ap.add_argument("--target", type=int, default=300,
+                    help="(youtube) 목표 라벨 추출 건수")
+    # 출력
     ap.add_argument("--output", type=str, default=None,
-                    help=f"기본: comment_labels/labeled_gpt41_azure_<label>_extra.jsonl")
+                    help="기본: comment_labels/labeled_gpt41_azure_<label>_extra.jsonl")
     ap.add_argument("--append", action="store_true",
                     help="기존 출력 파일에 append (기본은 덮어쓰기)")
     args = ap.parse_args()
+
+    # synthetic 모드는 LABEL_DEFINITIONS 에 있는 라벨만 가능
+    if args.mode == "synthetic" and args.label not in LABEL_DEFINITIONS:
+        ap.error(f"synthetic 모드는 {list(LABEL_DEFINITIONS.keys())} 만 지원. "
+                 f"VIDEO_REACTION 합성은 권장 안 함 (stereotype 위험). "
+                 f"VR 마이닝은 --mode youtube --label VIDEO_REACTION 권장.")
 
     # output path: label 별 기본 파일명
     if args.output:
@@ -437,17 +633,43 @@ def main() -> None:
         batch_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         print(f"[mode=synthetic] label={args.label} count={args.count} batch_id={batch_id}")
         recs = generate_synthetic(count=args.count, batch_id=batch_id, label=args.label)
-    else:  # label
+    elif args.mode == "label":
         if not args.input:
             ap.error("--mode label 사용 시 --input 필수")
-        print(f"[mode=label] input={args.input} heuristic={not args.no_heuristic}")
-        # label 모드는 현재 NOISE 만 추출 (4-class 분류 후 NOISE 만 keep)
+        print(f"[mode=label] input={args.input} target_label={args.label} "
+              f"heuristic={not args.no_heuristic}")
         recs = label_external(
             input_path=Path(args.input),
+            target_label=args.label,
             batch_size=args.batch_size,
             apply_heuristic=not args.no_heuristic,
             text_field=args.text_field,
             video_field=args.video_field,
+        )
+    else:  # youtube
+        # video_ids 소스 결정
+        if args.video_ids:
+            vids = [v.strip() for v in args.video_ids.split(",") if v.strip()]
+            src_desc = "CLI --video-ids"
+        elif args.video_ids_file:
+            with open(args.video_ids_file, encoding="utf-8") as f:
+                vids = [line.strip() for line in f if line.strip()]
+            src_desc = f"file {args.video_ids_file}"
+        else:
+            vids = None  # fetch_from_youtube 에서 labeled.jsonl 에서 자동
+            src_desc = "labeled_gpt41_azure.jsonl (auto)"
+
+        print(f"[mode=youtube] target_label={args.label} target={args.target}")
+        print(f"  source: {src_desc}")
+        print(f"  max_videos={args.max_videos}, per_video={args.per_video}")
+        recs = fetch_from_youtube(
+            target_label=args.label,
+            video_ids=vids,
+            per_video=args.per_video,
+            max_videos=args.max_videos,
+            target=args.target,
+            batch_size=args.batch_size,
+            apply_heuristic=not args.no_heuristic,
         )
 
     if not recs:
@@ -455,8 +677,7 @@ def main() -> None:
         return
 
     write_jsonl(output_path, recs, append=args.append)
-    target_label = args.label if args.mode == "synthetic" else "NOISE"
-    print(f"\n총 {len(recs)}건 {target_label} → {output_path} ({'append' if args.append else 'overwrite'})")
+    print(f"\n총 {len(recs)}건 {args.label} → {output_path} ({'append' if args.append else 'overwrite'})")
     print()
     print("학습 데이터에 합치려면:")
     print(f"  cat {output_path} >> {REPO_ROOT}/comment_labels/labeled_gpt41_azure.jsonl")
