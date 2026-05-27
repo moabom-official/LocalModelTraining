@@ -104,6 +104,11 @@ LABEL_DEFINITIONS: dict[str, str] = {
         "**제품 외** 영상 제작물 자체에 대한 반응. 제품 특성(성능/배터리/가격/디자인) 평가는 "
         "PRODUCT_OPINION 이므로 절대 포함 금지."
     ),
+    "QUESTION": (
+        "제품에 대한 질문 댓글. 성능/배터리/가격/구매처/호환성/비교/사용법 등 "
+        "**제품 관련** 정보를 묻는 의문문. 영상 자체나 리뷰어에 대한 질문(예: 다음 영상 언제?)"
+        "은 VIDEO_REACTION 으로 분류되므로 제외."
+    ),
 }
 
 SYNTHETIC_CATEGORIES: dict[str, list[tuple[str, str]]] = {
@@ -127,6 +132,16 @@ SYNTHETIC_CATEGORIES: dict[str, list[tuple[str, str]]] = {
         ("카메라워크·촬영",             "촬영 잘 했네요/각도 좋다/조명 좋네 등 카메라·촬영 품질 평가."),
         ("다음 영상 요청·구독·응원",     "다음 영상 기대됩니다/구독 누르고 갑니다/응원합니다 류. 영상 시리즈에 대한 반응."),
         ("영상 길이·구성 코멘트",        "딱 적당한 길이/너무 길어요/챕터 나눠주세요 등 영상 구성에 대한 평가."),
+    ],
+    "QUESTION": [
+        ("성능·스펙 질문",              "이거 게임 잘 돌아가요?/벤치 점수 어느 정도?/발열은 어때요? 등 성능 관련 의문문."),
+        ("배터리·충전 질문",            "배터리 몇 시간 가요?/고속충전 되나요?/사용시간 어느 정도? 등."),
+        ("가격·구매처 질문",            "어디서 사면 싸요?/지금 사도 되나요?/할인 언제? 등 구매 관련."),
+        ("호환·연결 질문",              "이전 모델 케이스 호환되나요?/케이블 USB-C인가요?/페어링 어떻게 하나요? 등."),
+        ("기능·옵션 질문",              "방수 되나요?/저장공간 옵션 뭐 있어요?/색상 종류는요? 등."),
+        ("비교·대체 질문",              "삼성꺼랑 비교하면?/이거랑 아이폰 중에 뭐가 나아요?/전작 대비 차이는? 등 비교 질문."),
+        ("사용·세팅 질문",              "처음 켰을 때 뭐부터 해야 해요?/이 기능 어떻게 끄나요?/추천 설정 있나요? 등."),
+        ("문제·고장 질문",              "이런 증상 정상인가요?/AS 어떻게 받나요?/펌업 뒤 느려졌는데? 등 문제 관련."),
     ],
 }
 
@@ -607,6 +622,31 @@ def write_jsonl(path: Path, records: list[dict], append: bool) -> None:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
+def auto_backup_and_apply(records: list[dict], label: str) -> tuple[Path, Path]:
+    """마이닝 결과를 자동으로:
+       1. comment_labels/backups/<label>_<timestamp>.jsonl 로 timestamped 백업
+       2. comment_labels/labeled_gpt41_azure.jsonl 에 직접 append
+    Returns: (backup_path, labeled_path)
+    """
+    if not records:
+        raise ValueError("records 0건 — apply 대상 없음")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backups_dir = REPO_ROOT / "comment_labels" / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    backup_path = backups_dir / f"{label.lower()}_{ts}_n{len(records)}.jsonl"
+    write_jsonl(backup_path, records, append=False)
+
+    labeled_path = REPO_ROOT / "comment_labels" / "labeled_gpt41_azure.jsonl"
+    # 안전: labeled.jsonl 이 이미 있을 때만 append (없으면 사용자 의도 확인 필요)
+    if not labeled_path.exists():
+        raise FileNotFoundError(
+            f"labeled.jsonl 없음 — apply 불가: {labeled_path}\n"
+            f"백업만 완료: {backup_path}"
+        )
+    write_jsonl(labeled_path, records, append=True)
+    return backup_path, labeled_path
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -645,6 +685,10 @@ def main() -> None:
                     help="기본: comment_labels/labeled_gpt41_azure_<label>_extra.jsonl")
     ap.add_argument("--append", action="store_true",
                     help="기존 출력 파일에 append (기본은 덮어쓰기)")
+    ap.add_argument("--apply", action="store_true",
+                    help="★ 마이닝 결과를 즉시 labeled_gpt41_azure.jsonl 에 append + "
+                         "comment_labels/backups/<label>_<ts>.jsonl 로 자동 timestamped 백업. "
+                         "다음 단계로 바로 prepare_dataset → train 가능.")
     args = ap.parse_args()
 
     # synthetic 모드는 LABEL_DEFINITIONS 에 있는 라벨만 가능
@@ -715,11 +759,26 @@ def main() -> None:
 
     write_jsonl(output_path, recs, append=args.append)
     print(f"\n총 {len(recs)}건 {args.label} → {output_path} ({'append' if args.append else 'overwrite'})")
-    print()
-    print("학습 데이터에 합치려면:")
-    print(f"  cat {output_path} >> {REPO_ROOT}/comment_labels/labeled_gpt41_azure.jsonl")
-    print(f"  python -m local_classifier.prepare_dataset")
-    print(f"  python -m local_classifier.train")
+
+    if args.apply:
+        try:
+            backup_path, labeled_path = auto_backup_and_apply(recs, args.label)
+            print()
+            print(f"✓ 자동 백업      : {backup_path}")
+            print(f"✓ 자동 합치기     : {labeled_path} (append {len(recs)} 건)")
+            print()
+            print("다음 단계:")
+            print("  python -m local_classifier.prepare_dataset")
+            print("  python -m local_classifier.train")
+            print("  python -m local_classifier.evaluate")
+        except Exception as e:
+            print(f"\n[apply 실패] {e}")
+    else:
+        print()
+        print("학습 데이터에 합치려면 (수동) — 또는 --apply 플래그 사용:")
+        print(f"  cat {output_path} >> {REPO_ROOT}/comment_labels/labeled_gpt41_azure.jsonl")
+        print(f"  python -m local_classifier.prepare_dataset")
+        print(f"  python -m local_classifier.train")
 
 
 if __name__ == "__main__":
