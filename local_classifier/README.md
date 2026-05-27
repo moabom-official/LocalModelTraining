@@ -10,7 +10,7 @@ GPT-4.1 teacher 라벨(`comment_labels/labeled_gpt41_azure.jsonl`, 6,375건)로 
 > 3. 3-class softmax + threshold rejection → val F1 0.90 이지만 test NOISE F1 0.034 (OOD overconfidence) → 폐기
 > 4. 3-class multi-label sigmoid + BCE → val F1 0.89 / test NOISE F1 0.0 더 악화 → 폐기
 >
-> **결론**: 후처리 rejection 으로는 OOD 검출 한계. NOISE 도 양성 클래스로 직접 학습이 가장 안정적이며, NOISE F1 정체는 데이터 보강 (`mine_noise.py` / `fetch_noise_groq.py`) 으로 해결.
+> **결론**: 후처리 rejection 으로는 OOD 검출 한계. NOISE 도 양성 클래스로 직접 학습이 가장 안정적이며, 약한 클래스(NOISE / VR) F1 정체는 데이터 보강 (`mine_noise.py` — GPT-4.1 합성, label-aware) 으로 해결.
 >
 > 구 CHATTER / OFF_TOPIC 라벨 입력은 `config.remap_legacy_label()` 가 NOISE 로 자동 매핑.
 

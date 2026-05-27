@@ -1,21 +1,28 @@
-"""NOISE 라벨 추가 마이닝 — GPT-4.1 teacher.
+"""클래스별 라벨 데이터 마이닝 — GPT-4.1 teacher (via RunYourAI 게이트웨이).
 
-4-class 학습에서 NOISE F1=0.60 정체 → NOISE class support 증가용 데이터 보강.
+4-class 학습의 약한 클래스(NOISE F1=0.667, VIDEO_REACTION F1=0.744 등)
+support 증가를 위한 데이터 보강 도구.
 
 두 가지 모드:
 
-  1. synthetic  : GPT-4.1 로 다양한 카테고리의 NOISE 댓글 생성 (입력 불필요)
-                  - 단순 반응 / 밈 / 음악 질문 / 일상 잡담 / 광고 / 다른 주제 등
+  1. synthetic  : GPT-4.1 로 다양한 카테고리의 합성 댓글 생성 (입력 불필요)
+                  --label 로 라벨 지정:
+                    NOISE          : 단순 반응/밈/BGM/잡담/광고/욕설/다른 주제 (8 카테고리)
+                    VIDEO_REACTION : 영상칭찬/설명력/편집/자막/톤발성/촬영/구독요청/길이 (8 카테고리)
 
-  2. label      : 사용자가 제공한 raw 댓글 JSONL 을 GPT-4.1 로 라벨링 후
-                  NOISE 만 추출
+  2. label      : 사용자가 제공한 raw 댓글 JSONL 을 GPT-4.1 로 4-class 분류 후
+                  NOISE 만 추출 (현재는 NOISE 만 지원)
 
 출력 형식은 ``comment_labels/labeled_gpt41_azure.jsonl`` 과 호환되며,
-별도 파일(`labeled_gpt41_azure_noise_extra.jsonl`)에 append 한다.
+별도 파일(`labeled_gpt41_azure_<label>_extra.jsonl`)에 append 한다.
 검토 후 본 라벨 파일에 cat 으로 합치면 `prepare_dataset` 가 자동 인식.
 
 사용 예:
+    # NOISE 합성 (기본)
     python -m local_classifier.mine_noise --mode synthetic --count 500
+    # VR 합성
+    python -m local_classifier.mine_noise --mode synthetic --label VIDEO_REACTION --count 400
+    # raw 댓글 NOISE 라벨링
     python -m local_classifier.mine_noise --mode label --input raw.jsonl
 
 필수 환경변수 (RunYourAI 게이트웨이 — OpenAI 호환 endpoint):
@@ -55,40 +62,52 @@ DEFAULT_OUTPUT = REPO_ROOT / "comment_labels" / "labeled_gpt41_azure_noise_extra
 # Prompts
 # ---------------------------------------------------------------------------
 
-SYNTHETIC_SYSTEM_PROMPT = """당신은 한국 유튜브 테크 리뷰 영상의 댓글 데이터를 생성하는 전문 어노테이터입니다.
-주어진 카테고리에 정확히 부합하는 **NOISE** 댓글을 다양한 길이·어조·패턴으로 생성합니다.
-
-NOISE 정의: 제품 평가도, 영상/리뷰어 반응도, 제품 관련 질문도 **아닌** 댓글.
-구체 카테고리: 단순 반응(ㅋㅋ/와/대박), 밈/유행어, 음악·BGM 질문, 다른 주제 잡담, 일상 안부,
-광고 의심, 욕설/저품질, 영상에 등장한 사람의 외모/사적 언급 등.
-
-반드시 JSON 배열로만 응답. 각 원소는 {"text": "..."} 형식. 다른 키 금지."""
-
-
-LABEL_SYSTEM_PROMPT = """당신은 한국 유튜브 테크 리뷰 영상의 댓글을 4-class로 분류하는 전문 어노테이터입니다.
-
-라벨:
-- PRODUCT_OPINION: 제품 성능/품질/가격/디자인 등 제품 자체에 대한 평가
-- VIDEO_REACTION : 영상/리뷰어/편집/연출에 대한 반응 (제품 외)
-- QUESTION       : 제품 관련 질문 (영상 자체 질문 아님)
-- NOISE          : 위 3개에 모두 해당 안 됨 (단순 반응/밈/음악·BGM 질문/일상 잡담/광고/다른 주제)
-
-각 댓글에 대해 라벨 + confidence(0.0~1.0) + 짧은 이유를 출력.
-반드시 JSON 배열로만 응답. 각 원소:
-{"i": <index>, "label": "...", "confidence": 0.95, "reason": "..."}
-다른 키나 텍스트 금지."""
+def _system_prompt(label: str, definition: str) -> str:
+    return (
+        f"당신은 한국 유튜브 테크 리뷰 영상의 댓글 데이터를 생성하는 전문 어노테이터입니다.\n"
+        f"주어진 카테고리에 정확히 부합하는 **{label}** 댓글을 다양한 길이·어조·패턴으로 생성합니다.\n\n"
+        f"{label} 정의: {definition}\n\n"
+        f'반드시 JSON 배열로만 응답. 각 원소는 {{"text": "..."}} 형식. 다른 키 금지.'
+    )
 
 
-SYNTHETIC_CATEGORIES = [
-    ("단순 반응/감탄사",            "ㅋㅋㅋ, 와, 헐, 대박, 미쳤다 같은 짧은 감탄. 의미 정보 없음."),
-    ("밈/유행어",                  "최근 한국 인터넷 밈, 유행어, 드립. 제품·영상과 무관."),
-    ("음악·BGM·썸네일 질문",        "배경음악 제목, BGM, 썸네일 디자인 문의."),
-    ("영상 출연자 외모/사적 언급",   "리뷰어 목소리/외모/머리 등 사적 코멘트. 제품·영상 내용 무관."),
-    ("일상 안부/잡담",              "오늘 날씨, 점심 메뉴, 주말 인사 등 비관련 잡담."),
-    ("광고 의심/스팸",              "단축 URL, 광고성 멘트, 다른 채널 홍보."),
-    ("욕설/저품질",                "단순 욕설이나 의미 없는 키보드 입력."),
-    ("다른 주제 (영상 무관)",       "정치·스포츠·연예 등 영상과 무관한 화제."),
-]
+# 라벨별 정의 + 카테고리 (label-aware 합성)
+LABEL_DEFINITIONS: dict[str, str] = {
+    "NOISE": (
+        "제품 평가도, 영상/리뷰어 반응도, 제품 관련 질문도 **아닌** 댓글. "
+        "구체 카테고리: 단순 반응(ㅋㅋ/와/대박), 밈/유행어, 음악·BGM 질문, "
+        "다른 주제 잡담, 일상 안부, 광고 의심, 욕설/저품질, "
+        "영상에 등장한 사람의 외모/사적 언급 등."
+    ),
+    "VIDEO_REACTION": (
+        "영상 자체, 리뷰어, 편집, 연출, 자막, 카메라워크, 영상 길이, 톤·발성 등 "
+        "**제품 외** 영상 제작물 자체에 대한 반응. 제품 특성(성능/배터리/가격/디자인) 평가는 "
+        "PRODUCT_OPINION 이므로 절대 포함 금지."
+    ),
+}
+
+SYNTHETIC_CATEGORIES: dict[str, list[tuple[str, str]]] = {
+    "NOISE": [
+        ("단순 반응/감탄사",            "ㅋㅋㅋ, 와, 헐, 대박, 미쳤다 같은 짧은 감탄. 의미 정보 없음."),
+        ("밈/유행어",                  "최근 한국 인터넷 밈, 유행어, 드립. 제품·영상과 무관."),
+        ("음악·BGM·썸네일 질문",        "배경음악 제목, BGM, 썸네일 디자인 문의."),
+        ("영상 출연자 외모/사적 언급",   "리뷰어 목소리/외모/머리 등 사적 코멘트. 제품·영상 내용 무관."),
+        ("일상 안부/잡담",              "오늘 날씨, 점심 메뉴, 주말 인사 등 비관련 잡담."),
+        ("광고 의심/스팸",              "단축 URL, 광고성 멘트, 다른 채널 홍보."),
+        ("욕설/저품질",                "단순 욕설이나 의미 없는 키보드 입력."),
+        ("다른 주제 (영상 무관)",       "정치·스포츠·연예 등 영상과 무관한 화제."),
+    ],
+    "VIDEO_REACTION": [
+        ("영상 자체 칭찬",              "영상 잘 만들었네요/재밌어요/퀄리티 좋네요 류. 제품 언급 없이 영상 자체에 대한 호평."),
+        ("리뷰어 설명력 평가",          "설명 잘 하시네요/이해 쏙쏙됨/쉽게 풀어주셔서 좋아요 등 화법·교수력 평가."),
+        ("편집·연출 칭찬·비판",         "편집 깔끔하다/컷 좋네요/효과 과하다 등 편집·연출 자체에 대한 평가."),
+        ("자막·디자인 코멘트",          "자막 가독성/색감/오타 지적/자막 잘 달아주세요 등 자막·자료 화면 코멘트."),
+        ("톤·발성·발음",                "목소리 좋네요/발음 명확/말 빠르네요 등 리뷰어 음성 평가 (외모 사적 언급은 NOISE)."),
+        ("카메라워크·촬영",             "촬영 잘 했네요/각도 좋다/조명 좋네 등 카메라·촬영 품질 평가."),
+        ("다음 영상 요청·구독·응원",     "다음 영상 기대됩니다/구독 누르고 갑니다/응원합니다 류. 영상 시리즈에 대한 반응."),
+        ("영상 길이·구성 코멘트",        "딱 적당한 길이/너무 길어요/챕터 나눠주세요 등 영상 구성에 대한 평가."),
+    ],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -208,24 +227,38 @@ def _call_llm_json(llm, system: str, user: str, retries: int = 3) -> list[dict]:
 # Synthetic mode
 # ---------------------------------------------------------------------------
 
-def generate_synthetic(count: int, batch_id: str) -> list[dict]:
-    """카테고리를 균등 분배해 NOISE 댓글 생성."""
+def generate_synthetic(count: int, batch_id: str, label: str = "NOISE") -> list[dict]:
+    """주어진 label 의 카테고리를 균등 분배해 합성 댓글 생성.
+
+    Args:
+        count: 목표 총 건수
+        batch_id: 합성 batch 식별자 (video_id prefix 로 사용)
+        label: "NOISE" 또는 "VIDEO_REACTION" 등 LABEL_DEFINITIONS 의 키
+    """
+    if label not in LABEL_DEFINITIONS:
+        raise ValueError(
+            f"지원하지 않는 라벨: {label}. "
+            f"가능: {list(LABEL_DEFINITIONS.keys())}"
+        )
+    categories = SYNTHETIC_CATEGORIES[label]
+    system_prompt = _system_prompt(label, LABEL_DEFINITIONS[label])
+
     llm = _get_llm(temperature=0.9)  # 다양성 위해 temperature 높임
-    per_cat = max(count // len(SYNTHETIC_CATEGORIES), 5)
+    per_cat = max(count // len(categories), 5)
     out: list[dict] = []
-    for cat_name, cat_desc in SYNTHETIC_CATEGORIES:
+    for cat_name, cat_desc in categories:
         if len(out) >= count:
             break
         user = (
             f"카테고리: {cat_name}\n"
             f"설명: {cat_desc}\n\n"
-            f"위 카테고리에 정확히 부합하는 **NOISE** 댓글을 정확히 {per_cat}개 생성하세요.\n"
+            f"위 카테고리에 정확히 부합하는 **{label}** 댓글을 정확히 {per_cat}개 생성하세요.\n"
             f"다양한 길이·어조·맞춤법 변형을 포함. 실제 유튜브 댓글 같은 자연스러움 유지.\n"
             f"JSON 배열만 출력: [{{\"text\": \"...\"}}, ...]"
         )
         print(f"  [{cat_name}] 요청 중...")
         try:
-            arr = _call_llm_json(llm, SYNTHETIC_SYSTEM_PROMPT, user)
+            arr = _call_llm_json(llm, system_prompt, user)
         except Exception as e:
             print(f"  [{cat_name}] FAIL: {e}")
             continue
@@ -235,10 +268,11 @@ def generate_synthetic(count: int, batch_id: str) -> list[dict]:
                 continue
             out.append(_make_record(
                 text=text,
-                comment_id=f"synth-{batch_id}-{cat_name[:4]}-{i:03d}",
-                video_id=f"synthetic-{batch_id}-{cat_name[:4]}",
+                comment_id=f"synth-{label[:4]}-{batch_id}-{cat_name[:4]}-{i:03d}",
+                video_id=f"synthetic-{label[:4]}-{batch_id}-{cat_name[:4]}",
                 confidence=0.95,
-                reasoning=f"synthetic NOISE ({cat_name})",
+                reasoning=f"synthetic {label} ({cat_name})",
+                label=label,
             ))
         print(f"  [{cat_name}] 누적 {len(out)}/{count}")
         if len(out) >= count:
@@ -330,19 +364,29 @@ def _make_record(
     video_id: str,
     confidence: float,
     reasoning: str,
+    label: str = "NOISE",
 ) -> dict:
+    # final_action / exclusion_reason 은 라벨에 따라 적절히 매핑.
+    final_action_map = {
+        "NOISE":           ("EXCLUDE",         "NOISE"),
+        "VIDEO_REACTION":  ("EXCLUDE",         "VIDEO_REACTION"),
+        "PRODUCT_OPINION": ("ANALYZE",         None),
+        "QUESTION":        ("AUXILIARY_STORE", None),
+    }
+    final_action, exclusion_reason = final_action_map.get(label, ("EXCLUDE", label))
+    is_product_related = label in {"PRODUCT_OPINION", "QUESTION"}
     return {
         "comment_id": comment_id,
         "video_id": video_id,
         "product_id": None,
         "text": text,
-        "label": "NOISE",
+        "label": label,
         "confidence": round(confidence, 4),
-        "label_scores": {"NOISE": round(confidence, 4)},
+        "label_scores": {label: round(confidence, 4)},
         "teacher_model": "openai/gpt-4.1-2025-04-14",
-        "final_action": "EXCLUDE",
-        "exclusion_reason": "NOISE",
-        "is_product_related": False,
+        "final_action": final_action,
+        "exclusion_reason": exclusion_reason,
+        "is_product_related": is_product_related,
         "like_count": 0,
         "reply_count": 0,
         "classified_at": datetime.now(timezone.utc).isoformat(),
@@ -365,6 +409,8 @@ def write_jsonl(path: Path, records: list[dict], append: bool) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--mode", choices=["synthetic", "label"], required=True)
+    ap.add_argument("--label", choices=list(LABEL_DEFINITIONS.keys()), default="NOISE",
+                    help="(synthetic) 생성할 라벨. NOISE 또는 VIDEO_REACTION")
     ap.add_argument("--count", type=int, default=500,
                     help="(synthetic) 생성 댓글 수")
     ap.add_argument("--input", type=str, default=None,
@@ -374,20 +420,28 @@ def main() -> None:
     ap.add_argument("--no-heuristic", action="store_true",
                     help="(label) 휴리스틱 pre-filter 건너뛰기 — 전수 라벨링")
     ap.add_argument("--batch-size", type=int, default=25)
-    ap.add_argument("--output", type=str, default=str(DEFAULT_OUTPUT))
+    ap.add_argument("--output", type=str, default=None,
+                    help=f"기본: comment_labels/labeled_gpt41_azure_<label>_extra.jsonl")
     ap.add_argument("--append", action="store_true",
                     help="기존 출력 파일에 append (기본은 덮어쓰기)")
     args = ap.parse_args()
 
-    output_path = Path(args.output)
+    # output path: label 별 기본 파일명
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        suffix = args.label.lower()
+        output_path = REPO_ROOT / "comment_labels" / f"labeled_gpt41_azure_{suffix}_extra.jsonl"
+
     if args.mode == "synthetic":
         batch_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-        print(f"[mode=synthetic] count={args.count} batch_id={batch_id}")
-        recs = generate_synthetic(count=args.count, batch_id=batch_id)
+        print(f"[mode=synthetic] label={args.label} count={args.count} batch_id={batch_id}")
+        recs = generate_synthetic(count=args.count, batch_id=batch_id, label=args.label)
     else:  # label
         if not args.input:
             ap.error("--mode label 사용 시 --input 필수")
         print(f"[mode=label] input={args.input} heuristic={not args.no_heuristic}")
+        # label 모드는 현재 NOISE 만 추출 (4-class 분류 후 NOISE 만 keep)
         recs = label_external(
             input_path=Path(args.input),
             batch_size=args.batch_size,
@@ -401,7 +455,8 @@ def main() -> None:
         return
 
     write_jsonl(output_path, recs, append=args.append)
-    print(f"\n총 {len(recs)}건 NOISE → {output_path} ({'append' if args.append else 'overwrite'})")
+    target_label = args.label if args.mode == "synthetic" else "NOISE"
+    print(f"\n총 {len(recs)}건 {target_label} → {output_path} ({'append' if args.append else 'overwrite'})")
     print()
     print("학습 데이터에 합치려면:")
     print(f"  cat {output_path} >> {REPO_ROOT}/comment_labels/labeled_gpt41_azure.jsonl")
