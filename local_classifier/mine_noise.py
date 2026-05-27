@@ -108,8 +108,9 @@ LABEL_DEFINITIONS: dict[str, str] = {
 
 SYNTHETIC_CATEGORIES: dict[str, list[tuple[str, str]]] = {
     "NOISE": [
-        ("단순 반응/감탄사",            "ㅋㅋㅋ, 와, 헐, 대박, 미쳤다 같은 짧은 감탄. 의미 정보 없음."),
-        ("밈/유행어",                  "최근 한국 인터넷 밈, 유행어, 드립. 제품·영상과 무관."),
+        # "단순 반응/감탄사" 는 짧아서 prepare_dataset dedup 에 거의 다 잘림 → 제거.
+        # 짧은 NOISE 는 운영 라벨에 이미 충분 (CHATTER 405 의 대다수).
+        ("밈/유행어 (긴 문장)",        "최근 한국 인터넷 밈, 유행어, 드립을 활용한 한 문장 이상의 댓글. 제품·영상 무관."),
         ("음악·BGM·썸네일 질문",        "배경음악 제목, BGM, 썸네일 디자인 문의."),
         ("영상 출연자 외모/사적 언급",   "리뷰어 목소리/외모/머리 등 사적 코멘트. 제품·영상 내용 무관."),
         ("일상 안부/잡담",              "오늘 날씨, 점심 메뉴, 주말 인사 등 비관련 잡담."),
@@ -247,13 +248,20 @@ def _call_llm_json(llm, system: str, user: str, retries: int = 3) -> list[dict]:
 # Synthetic mode
 # ---------------------------------------------------------------------------
 
-def generate_synthetic(count: int, batch_id: str, label: str = "NOISE") -> list[dict]:
+def generate_synthetic(
+    count: int,
+    batch_id: str,
+    label: str = "NOISE",
+    min_length: int = 10,
+) -> list[dict]:
     """주어진 label 의 카테고리를 균등 분배해 합성 댓글 생성.
 
     Args:
         count: 목표 총 건수
         batch_id: 합성 batch 식별자 (video_id prefix 로 사용)
         label: "NOISE" 또는 "VIDEO_REACTION" 등 LABEL_DEFINITIONS 의 키
+        min_length: 길이 (글자 수) 하한. NOISE 의 경우 짧은 반응(ㅋㅋ, 와)은
+                    이미 학습 데이터에 충분 → dedup 회피 위해 길게 생성/필터.
     """
     if label not in LABEL_DEFINITIONS:
         raise ValueError(
@@ -265,15 +273,23 @@ def generate_synthetic(count: int, batch_id: str, label: str = "NOISE") -> list[
 
     llm = _get_llm(temperature=0.9)  # 다양성 위해 temperature 높임
     per_cat = max(count // len(categories), 5)
+    # LLM 이 짧은 거 안 만들도록 보정해서 더 요청 (후처리 필터 손실 보전).
+    over_request_factor = 1.8 if min_length >= 8 else 1.2
+    per_cat_request = int(per_cat * over_request_factor)
     out: list[dict] = []
+    dropped_short = 0
     for cat_name, cat_desc in categories:
         if len(out) >= count:
             break
+        length_hint = (
+            f" 길이는 최소 {min_length}글자 이상의 자연스러운 문장으로 작성."
+            if min_length >= 6 else ""
+        )
         user = (
             f"카테고리: {cat_name}\n"
             f"설명: {cat_desc}\n\n"
-            f"위 카테고리에 정확히 부합하는 **{label}** 댓글을 정확히 {per_cat}개 생성하세요.\n"
-            f"다양한 길이·어조·맞춤법 변형을 포함. 실제 유튜브 댓글 같은 자연스러움 유지.\n"
+            f"위 카테고리에 정확히 부합하는 **{label}** 댓글을 정확히 {per_cat_request}개 생성하세요.\n"
+            f"다양한 어조·맞춤법 변형을 포함. 실제 유튜브 댓글 같은 자연스러움 유지.{length_hint}\n"
             f"JSON 배열만 출력: [{{\"text\": \"...\"}}, ...]"
         )
         print(f"  [{cat_name}] 요청 중...")
@@ -284,7 +300,12 @@ def generate_synthetic(count: int, batch_id: str, label: str = "NOISE") -> list[
             continue
         for i, rec in enumerate(arr):
             text = (rec.get("text") or "").strip()
-            if not text or len(text) < C.MIN_TEXT_LEN or len(text) > C.MAX_TEXT_LEN:
+            if not text:
+                continue
+            if len(text) > C.MAX_TEXT_LEN:
+                continue
+            if len(text) < max(C.MIN_TEXT_LEN, min_length):
+                dropped_short += 1
                 continue
             out.append(_make_record(
                 text=text,
@@ -294,10 +315,12 @@ def generate_synthetic(count: int, batch_id: str, label: str = "NOISE") -> list[
                 reasoning=f"synthetic {label} ({cat_name})",
                 label=label,
             ))
-        print(f"  [{cat_name}] 누적 {len(out)}/{count}")
+        print(f"  [{cat_name}] 누적 {len(out)}/{count}  (짧아서 drop: {dropped_short})")
         if len(out) >= count:
             out = out[:count]
             break
+    if dropped_short:
+        print(f"\n총 짧음 drop: {dropped_short}건 (min_length={min_length})")
     return out
 
 
@@ -470,10 +493,12 @@ def fetch_from_youtube(
     batch_size: int = 25,
     apply_heuristic: bool = False,
     seed: int = 42,
+    min_length: int = 6,
 ) -> list[dict]:
     """YouTube 실 댓글 fetch → GPT-4.1 4-class 분류 → target_label 만 추출.
 
     합성 데이터의 stereotype 문제 우회. 실제 운영 분포에 가까운 댓글만 학습 데이터화.
+    min_length: 짧은 NOISE 는 학습 데이터에 이미 충분 → dedup 회피 위해 기본 6+.
     """
     if not video_ids:
         video_ids = _video_ids_from_labeled()
@@ -491,8 +516,11 @@ def fetch_from_youtube(
     raw = _fetch_youtube_comments(video_ids, per_video=per_video)
     print(f"  total fetched: {len(raw)}")
 
-    # 길이 필터
-    raw = [r for r in raw if C.MIN_TEXT_LEN <= len(r["text"]) <= C.MAX_TEXT_LEN]
+    # 길이 필터 — min_length 적용 (짧은 NOISE 는 dedup 통과 어려움)
+    effective_min = max(C.MIN_TEXT_LEN, min_length)
+    before = len(raw)
+    raw = [r for r in raw if effective_min <= len(r["text"]) <= C.MAX_TEXT_LEN]
+    print(f"  after length filter (≥{effective_min}자): {before} → {len(raw)}")
     # 텍스트 중복 제거
     seen: set[str] = set()
     dedup: list[dict] = []
@@ -609,6 +637,9 @@ def main() -> None:
                     help="(youtube) 처리할 영상 최대 개수")
     ap.add_argument("--target", type=int, default=300,
                     help="(youtube) 목표 라벨 추출 건수")
+    ap.add_argument("--min-length", type=int, default=None,
+                    help="텍스트 최소 길이 (글자 수). 기본: synthetic=10, youtube=6. "
+                         "짧은 NOISE 는 학습 데이터에 이미 충분해 dedup 에 잘림.")
     # 출력
     ap.add_argument("--output", type=str, default=None,
                     help="기본: comment_labels/labeled_gpt41_azure_<label>_extra.jsonl")
@@ -631,8 +662,11 @@ def main() -> None:
 
     if args.mode == "synthetic":
         batch_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-        print(f"[mode=synthetic] label={args.label} count={args.count} batch_id={batch_id}")
-        recs = generate_synthetic(count=args.count, batch_id=batch_id, label=args.label)
+        min_len = args.min_length if args.min_length is not None else 10
+        print(f"[mode=synthetic] label={args.label} count={args.count} "
+              f"min_length={min_len} batch_id={batch_id}")
+        recs = generate_synthetic(count=args.count, batch_id=batch_id,
+                                   label=args.label, min_length=min_len)
     elif args.mode == "label":
         if not args.input:
             ap.error("--mode label 사용 시 --input 필수")
@@ -659,7 +693,9 @@ def main() -> None:
             vids = None  # fetch_from_youtube 에서 labeled.jsonl 에서 자동
             src_desc = "labeled_gpt41_azure.jsonl (auto)"
 
-        print(f"[mode=youtube] target_label={args.label} target={args.target}")
+        min_len = args.min_length if args.min_length is not None else 6
+        print(f"[mode=youtube] target_label={args.label} target={args.target} "
+              f"min_length={min_len}")
         print(f"  source: {src_desc}")
         print(f"  max_videos={args.max_videos}, per_video={args.per_video}")
         recs = fetch_from_youtube(
@@ -670,6 +706,7 @@ def main() -> None:
             target=args.target,
             batch_size=args.batch_size,
             apply_heuristic=not args.no_heuristic,
+            min_length=min_len,
         )
 
     if not recs:
